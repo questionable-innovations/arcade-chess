@@ -12,7 +12,7 @@ struct AppConfig {
   String websocket_host = "chess-be.qinnovate.nz";
   uint16_t websocket_port = 443;
   String websocket_path = "/board";
-  uint8_t orientation[4]{};
+  uint8_t orientation[arcade::kQuadrantCount]{};
   arcade::RuntimeMode runtime_mode = arcade::RuntimeMode::kNormal;
 
   void load(Preferences& preferences);

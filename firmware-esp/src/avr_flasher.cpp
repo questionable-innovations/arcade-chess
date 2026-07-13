@@ -4,15 +4,51 @@
 #include <string.h>
 
 namespace {
-constexpr uint32_t kAppLimit = 32384;
-constexpr uint32_t kPageSize = 128;
-constexpr uint32_t kBusBaud = 38400;
+constexpr uint32_t kAppLimit = arcade::kAvrApplicationLimit;
+constexpr uint16_t kPageSize = arcade::kAvrFlashPageBytes;
+constexpr uint32_t kBusBaud = arcade::kBusBaud;
 // Must match board_bootloader.speed in firmware-atmega/platformio.ini. If sync
 // proves unreliable on the diode-OR return at this rate, rebuild urboot slower.
 constexpr uint32_t kBootloaderBaud = 115200;
 constexpr uint8_t kStkInSync = 0x14;
 constexpr uint8_t kStkOk = 0x10;
 constexpr uint8_t kCrcEop = 0x20;
+constexpr uint8_t kStkGetSync = 0x30;
+constexpr uint8_t kStkLoadAddress = 0x55;
+constexpr uint8_t kStkProgramPage = 0x64;
+constexpr uint8_t kStkReadPage = 0x74;
+constexpr uint8_t kStkLeaveProgmode = 0x51;
+constexpr uint8_t kStkResponseOverhead = 2;
+constexpr uint8_t kMaximumPageRetries = 3;
+constexpr uint8_t kMaximumHealthPollRetries = 4;
+constexpr uint8_t kMaximumSyncAttempts = 80;
+constexpr uint8_t kProgressPageInterval = 32;
+constexpr uint32_t kHandoffTimeoutMs = 8000;
+constexpr uint32_t kBootResetDelayMs = 50;
+constexpr uint32_t kApplicationBootDelayMs = 1500;
+constexpr uint32_t kHealthResponseTimeoutMs = 3000;
+constexpr uint32_t kSyncCommandTimeoutMs = 80;
+constexpr uint32_t kLoadAddressTimeoutMs = 150;
+constexpr uint32_t kPageCommandTimeoutMs = 400;
+constexpr uint32_t kLeaveProgrammingTimeoutMs = 300;
+constexpr uint16_t kSerialPollDelayUs = 200;
+constexpr uint8_t kHexMaximumDataBytes = UINT8_MAX;
+constexpr uint8_t kHexFixedRecordBytes = 5;  // count, address, type, checksum
+constexpr uint8_t kHexHeaderBytes = 4;
+constexpr uint8_t kHealthPayloadBytes = 14;
+constexpr uint8_t kHealthMarkerOffset = 0;
+constexpr uint8_t kHealthResetCauseOffset = 1;
+constexpr uint8_t kHealthUpdateIdOffset = 6;
+constexpr uint8_t kHealthCrcOffset = 10;
+
+enum class HexRecordType : uint8_t {
+  kData = 0x00,
+  kEndOfFile = 0x01,
+  kExtendedSegmentAddress = 0x02,
+  kStartSegmentAddress = 0x03,
+  kExtendedLinearAddress = 0x04,
+  kStartLinearAddress = 0x05,
+};
 
 uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t length) {
   crc = ~crc;
@@ -51,7 +87,8 @@ void AvrFlasher::begin(BusManager& bus, HardwareSerial& bus_serial) {
 }
 
 bool AvrFlasher::start(uint8_t node) {
-  if (phase_ != Phase::kIdle || node > 3 || bus_->programmingHandoff()) return false;
+  if (phase_ != Phase::kIdle || node >= arcade::kQuadrantCount ||
+      bus_->programmingHandoff()) return false;
   if (!bus_->isOnline(node)) {
     Serial.printf("FLASH FAIL node=%u offline\n", node);
     return false;
@@ -92,8 +129,10 @@ bool AvrFlasher::consumeLine(const char* line) {
 
 bool AvrFlasher::parseHexLine(const char* line) {
   const size_t text_length = strlen(line + 1);
-  if (text_length < 10 || text_length % 2) { fail("short/odd hex record"); return false; }
-  uint8_t record[4 + 255 + 1];
+  if (text_length < kHexFixedRecordBytes * 2 || text_length % 2) {
+    fail("short/odd hex record"); return false;
+  }
+  uint8_t record[kHexHeaderBytes + kHexMaximumDataBytes + 1];
   const size_t byte_count = text_length / 2;
   if (byte_count > sizeof(record)) { fail("oversized hex record"); return false; }
   uint8_t checksum = 0;
@@ -104,31 +143,33 @@ bool AvrFlasher::parseHexLine(const char* line) {
     checksum += record[i];
   }
   const uint8_t length = record[0];
-  if (byte_count != 5u + length) { fail("record length mismatch"); return false; }
+  if (byte_count != kHexFixedRecordBytes + length) {
+    fail("record length mismatch"); return false;
+  }
   if (checksum) { fail("record checksum mismatch"); return false; }
   const uint16_t address = static_cast<uint16_t>(record[1]) << 8 | record[2];
   const uint8_t type = record[3];
   const uint8_t* data = record + 4;
 
-  switch (type) {
-    case 0x00: {  // data
+  switch (static_cast<HexRecordType>(type)) {
+    case HexRecordType::kData: {
       const uint32_t absolute = ext_base_ + address;
       if (absolute + length > kAppLimit) { fail("record beyond application limit"); return false; }
       memcpy(image_ + absolute, data, length);
       if (absolute + length > image_size_) image_size_ = absolute + length;
       return true;
     }
-    case 0x01:  // end of file
+    case HexRecordType::kEndOfFile:
       eof_seen_ = true;
       return true;
-    case 0x02:  // extended segment address
+    case HexRecordType::kExtendedSegmentAddress:
       ext_base_ = (static_cast<uint32_t>(data[0]) << 8 | data[1]) << 4;
       return true;
-    case 0x04:  // extended linear address
+    case HexRecordType::kExtendedLinearAddress:
       ext_base_ = (static_cast<uint32_t>(data[0]) << 8 | data[1]) << 16;
       return true;
-    case 0x03:
-    case 0x05:  // start address records carry no flash data
+    case HexRecordType::kStartSegmentAddress:
+    case HexRecordType::kStartLinearAddress:  // start records carry no flash data
       return true;
     default:
       fail("unsupported hex record type");
@@ -150,7 +191,7 @@ void AvrFlasher::finishReceive() {
     return;
   }
   phase_ = Phase::kAwaitHandoff;
-  deadline_ms_ = millis() + 8000;
+  deadline_ms_ = millis() + kHandoffTimeoutMs;
 }
 
 void AvrFlasher::tick(uint32_t now_ms) {
@@ -165,7 +206,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
         while (serial_->available()) serial_->read();
         phase_ = Phase::kSync;
         sync_attempts_ = 0;
-        deadline_ms_ = now_ms + 50;  // let the AVR reset into urboot
+        deadline_ms_ = now_ms + kBootResetDelayMs;
       } else if (static_cast<int32_t>(now_ms - deadline_ms_) >= 0) {
         fail("bootloader entry not acknowledged");
       }
@@ -180,8 +221,10 @@ void AvrFlasher::tick(uint32_t now_ms) {
         page_retries_ = 0;
         return;
       }
-      if (++sync_attempts_ >= 80) { fail("bootloader sync timeout"); return; }
-      deadline_ms_ = now_ms + 50;
+      if (++sync_attempts_ >= kMaximumSyncAttempts) {
+        fail("bootloader sync timeout"); return;
+      }
+      deadline_ms_ = now_ms + kBootResetDelayMs;
       return;
 
     case Phase::kProgram: {
@@ -190,10 +233,10 @@ void AvrFlasher::tick(uint32_t now_ms) {
           stkProgramPage(address)) {
         page_retries_ = 0;
         if (++page_ >= page_count_) { phase_ = Phase::kVerify; page_ = 0; return; }
-        if (!(page_ % 32)) {
+        if (!(page_ % kProgressPageInterval)) {
           Serial.printf("PROG %u/%u pages\n", page_, page_count_);
         }
-      } else if (++page_retries_ > 3) {
+      } else if (++page_retries_ > kMaximumPageRetries) {
         fail("page program retries exhausted");
       }
       return;
@@ -205,7 +248,9 @@ void AvrFlasher::tick(uint32_t now_ms) {
           stkVerifyPage(address)) {
         page_retries_ = 0;
         if (++page_ < page_count_) {
-          if (!(page_ % 32)) Serial.printf("VRFY %u/%u pages\n", page_, page_count_);
+          if (!(page_ % kProgressPageInterval)) {
+            Serial.printf("VRFY %u/%u pages\n", page_, page_count_);
+          }
           return;
         }
         Serial.println(F("VERIFY ok; leaving bootloader"));
@@ -214,8 +259,8 @@ void AvrFlasher::tick(uint32_t now_ms) {
         bus_->endFirmwareMaintenance(token_);
         phase_ = Phase::kAwaitBoot;
         poll_retries_ = 0;
-        deadline_ms_ = millis() + 1500;
-      } else if (++page_retries_ > 3) {
+        deadline_ms_ = millis() + kApplicationBootDelayMs;
+      } else if (++page_retries_ > kMaximumPageRetries) {
         fail("page verify failed");
       }
       return;
@@ -225,13 +270,13 @@ void AvrFlasher::tick(uint32_t now_ms) {
       if (static_cast<int32_t>(now_ms - deadline_ms_) < 0) return;
       if (!bus_->enqueue(node_, arcade::MessageType::kFwHealth, nullptr, 0)) return;
       phase_ = Phase::kHealth;
-      deadline_ms_ = now_ms + 3000;
+      deadline_ms_ = now_ms + kHealthResponseTimeoutMs;
       return;
 
     case Phase::kHealth:
     case Phase::kConfirm:
       if (static_cast<int32_t>(now_ms - deadline_ms_) < 0) return;
-      if (++poll_retries_ > 4) {
+      if (++poll_retries_ > kMaximumHealthPollRetries) {
         fail(phase_ == Phase::kHealth ? "no application health response"
                                       : "no confirm response");
         return;
@@ -243,7 +288,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
         arcade::putU32(payload, update_id_);
         bus_->enqueue(node_, arcade::MessageType::kFwConfirm, payload, sizeof(payload));
       }
-      deadline_ms_ = now_ms + 3000;
+      deadline_ms_ = now_ms + kHealthResponseTimeoutMs;
       return;
   }
 }
@@ -252,14 +297,14 @@ void AvrFlasher::onFwResponse(uint8_t node, arcade::MessageType type, bool ok,
                               const uint8_t* payload, uint8_t length) {
   if (node != node_) return;
   if (phase_ == Phase::kHealth && type == arcade::MessageType::kFwHealth) {
-    if (!ok || length < 14) { fail("health request rejected"); return; }
-    const uint8_t marker_state = payload[0];
-    const uint32_t update_id = arcade::getU32(payload + 6);
-    const uint32_t crc32 = arcade::getU32(payload + 10);
+    if (!ok || length < kHealthPayloadBytes) { fail("health request rejected"); return; }
+    const uint8_t marker_state = payload[kHealthMarkerOffset];
+    const uint32_t update_id = arcade::getU32(payload + kHealthUpdateIdOffset);
+    const uint32_t crc32 = arcade::getU32(payload + kHealthCrcOffset);
     Serial.printf("HEALTH marker=%u reset=0x%02x update_id=0x%08x crc32=0x%08x\n",
-                  marker_state, payload[1], update_id, crc32);
-    // 3 = candidate awaiting confirm (see quadrant UpdateState).
-    if (marker_state != 3 || update_id != update_id_ || crc32 != image_crc32_) {
+                  marker_state, payload[kHealthResetCauseOffset], update_id, crc32);
+    if (marker_state != static_cast<uint8_t>(arcade::FirmwareState::kCandidate) ||
+        update_id != update_id_ || crc32 != image_crc32_) {
       fail("health/marker mismatch");
       return;
     }
@@ -268,7 +313,7 @@ void AvrFlasher::onFwResponse(uint8_t node, arcade::MessageType type, bool ok,
     bus_->enqueue(node_, arcade::MessageType::kFwConfirm, confirm, sizeof(confirm));
     phase_ = Phase::kConfirm;
     poll_retries_ = 0;
-    deadline_ms_ = millis() + 3000;
+    deadline_ms_ = millis() + kHealthResponseTimeoutMs;
   } else if (phase_ == Phase::kConfirm && type == arcade::MessageType::kFwConfirm) {
     if (!ok) { fail("confirm rejected"); return; }
     finishSuccess();
@@ -276,7 +321,7 @@ void AvrFlasher::onFwResponse(uint8_t node, arcade::MessageType type, bool ok,
 }
 
 void AvrFlasher::finishSuccess() {
-  Serial.printf("FLASH OK node=%u size=%u crc32=0x%08x pages=%u elapsed_ms=%u\n",
+  Serial.printf("FLASH OK node=%u size=%u crc32=0x%08x pages=%u elapsed_ms=%lu\n",
                 node_, image_size_, image_crc32_, page_count_,
                 millis() - started_ms_);
   free(image_);
@@ -310,15 +355,15 @@ bool AvrFlasher::stkCommand(const uint8_t* request, size_t request_length,
   while (serial_->available()) serial_->read();
   serial_->write(request, request_length);
   serial_->flush();
-  uint8_t framed[2 + 128];
-  const size_t total = response_length + 2;
+  uint8_t framed[kStkResponseOverhead + kPageSize];
+  const size_t total = response_length + kStkResponseOverhead;
   if (total > sizeof(framed)) return false;
   const uint32_t deadline = millis() + timeout_ms;
   size_t received = 0;
   while (received < total) {
     if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
     const int value = serial_->read();
-    if (value < 0) { delayMicroseconds(200); continue; }
+    if (value < 0) { delayMicroseconds(kSerialPollDelayUs); continue; }
     framed[received++] = static_cast<uint8_t>(value);
   }
   if (framed[0] != kStkInSync || framed[total - 1] != kStkOk) return false;
@@ -327,37 +372,40 @@ bool AvrFlasher::stkCommand(const uint8_t* request, size_t request_length,
 }
 
 bool AvrFlasher::stkSync() {
-  const uint8_t request[] = {0x30, kCrcEop};  // STK_GET_SYNC
-  return stkCommand(request, sizeof(request), nullptr, 0, 80);
+  const uint8_t request[] = {kStkGetSync, kCrcEop};
+  return stkCommand(request, sizeof(request), nullptr, 0, kSyncCommandTimeoutMs);
 }
 
 bool AvrFlasher::stkLoadAddress(uint16_t word_address) {
-  const uint8_t request[] = {0x55, static_cast<uint8_t>(word_address),
+  // STK500v1 addresses flash in words even though page data is byte-oriented.
+  const uint8_t request[] = {kStkLoadAddress, static_cast<uint8_t>(word_address),
                              static_cast<uint8_t>(word_address >> 8), kCrcEop};
-  return stkCommand(request, sizeof(request), nullptr, 0, 150);
+  return stkCommand(request, sizeof(request), nullptr, 0, kLoadAddressTimeoutMs);
 }
 
 bool AvrFlasher::stkProgramPage(uint32_t byte_address) {
   uint8_t request[4 + kPageSize + 1];
-  request[0] = 0x64;  // STK_PROG_PAGE
+  request[0] = kStkProgramPage;
   request[1] = static_cast<uint8_t>(kPageSize >> 8);
   request[2] = static_cast<uint8_t>(kPageSize);
   request[3] = 'F';
   memcpy(request + 4, image_ + byte_address, kPageSize);
   request[4 + kPageSize] = kCrcEop;
-  return stkCommand(request, sizeof(request), nullptr, 0, 400);
+  return stkCommand(request, sizeof(request), nullptr, 0, kPageCommandTimeoutMs);
 }
 
 bool AvrFlasher::stkVerifyPage(uint32_t byte_address) {
-  const uint8_t request[] = {0x74,  // STK_READ_PAGE
+  const uint8_t request[] = {kStkReadPage,
                              static_cast<uint8_t>(kPageSize >> 8),
                              static_cast<uint8_t>(kPageSize), 'F', kCrcEop};
   uint8_t page[kPageSize];
-  if (!stkCommand(request, sizeof(request), page, kPageSize, 400)) return false;
+  if (!stkCommand(request, sizeof(request), page, kPageSize,
+                  kPageCommandTimeoutMs)) return false;
   return memcmp(page, image_ + byte_address, kPageSize) == 0;
 }
 
 bool AvrFlasher::stkLeaveProgmode() {
-  const uint8_t request[] = {0x51, kCrcEop};  // STK_LEAVE_PROGMODE
-  return stkCommand(request, sizeof(request), nullptr, 0, 300);
+  const uint8_t request[] = {kStkLeaveProgmode, kCrcEop};
+  return stkCommand(request, sizeof(request), nullptr, 0,
+                    kLeaveProgrammingTimeoutMs);
 }

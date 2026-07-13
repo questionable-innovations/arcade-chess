@@ -5,7 +5,7 @@
 namespace {
 constexpr uint8_t kBusRxPin = 17;
 constexpr uint8_t kBusTxPin = 16;
-constexpr uint32_t kBusBaud = 38400;
+constexpr uint32_t kBusBaud = arcade::kBusBaud;
 constexpr uint32_t kResponseTimeoutMs = 25;
 constexpr uint32_t kOnlinePollIntervalMs = 10;
 constexpr uint32_t kOfflineProbeBaseMs = 1000;
@@ -24,6 +24,16 @@ constexpr uint8_t kRawHeaderBytes = 3;
 constexpr uint8_t kRawSquareBytes = 6;
 constexpr uint8_t kRawPayloadBytes =
     kRawHeaderBytes + arcade::kSquaresPerQuadrant * kRawSquareBytes;
+constexpr uint8_t kPreflightPayloadBytes = 18;
+constexpr uint8_t kPreflightFuseOffset = 1;
+constexpr uint8_t kPreflightBootloaderOffset = 2;
+constexpr uint8_t kPreflightProtocolOffset = 3;
+constexpr uint8_t kPreflightPageSizeOffset = 4;
+constexpr uint8_t kPreflightFlashSizeOffset = 6;
+constexpr uint8_t kPreflightApplicationLimitOffset = 10;
+constexpr uint8_t kPreflightStateOffset = 14;
+constexpr uint8_t kPreflightResetCauseOffset = 15;
+constexpr uint8_t kPreflightSupplyMvOffset = 16;
 
 template <size_t Capacity>
 void copyCorrelation(char (&output)[Capacity], const char* input) {
@@ -224,12 +234,18 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
       node.state[i] = static_cast<arcade::SensorState>(frame.payload[i]);
       node.raw[i] = arcade::getU16(frame.payload + kSnapshotRawOffset + i * sizeof(uint16_t));
     }
-  } else if (ok && pending_type_ == arcade::MessageType::kFwPreflight && frame.payload_length >= 18) {
+  } else if (ok && pending_type_ == arcade::MessageType::kFwPreflight &&
+             frame.payload_length >= kPreflightPayloadBytes) {
     Serial.printf("[%10u][I][FW] node=%u hfuse=0x%02x boot=%u handoff_v=%u page=%u flash=%u app_limit=%u marker=%u reset=0x%02x avcc=%u\n",
-                  now_ms, frame.source, frame.payload[1], frame.payload[2], frame.payload[3],
-                  arcade::getU16(frame.payload + 4), arcade::getU32(frame.payload + 6),
-                  arcade::getU32(frame.payload + 10), frame.payload[14], frame.payload[15],
-                  arcade::getU16(frame.payload + 16));
+                  now_ms, frame.source, frame.payload[kPreflightFuseOffset],
+                  frame.payload[kPreflightBootloaderOffset],
+                  frame.payload[kPreflightProtocolOffset],
+                  arcade::getU16(frame.payload + kPreflightPageSizeOffset),
+                  arcade::getU32(frame.payload + kPreflightFlashSizeOffset),
+                  arcade::getU32(frame.payload + kPreflightApplicationLimitOffset),
+                  frame.payload[kPreflightStateOffset],
+                  frame.payload[kPreflightResetCauseOffset],
+                  arcade::getU16(frame.payload + kPreflightSupplyMvOffset));
   } else if (ok && pending_type_ == arcade::MessageType::kFwEnterBootloader) {
     programming_handoff_ = true;
     Serial.printf("[%10u][I][FW] target=%u ACKed bootloader entry; framed polling stopped\n",

@@ -8,7 +8,6 @@
 namespace quadrant {
 namespace {
 constexpr uint8_t kMaximumEventsPerResponse = 8;
-constexpr uint8_t kEventPayloadBytes = 8;
 constexpr uint8_t kRawHeaderBytes = 3;
 constexpr uint8_t kRawSquareBytes = 6;
 constexpr uint8_t kConfigEntryBytes = 3;

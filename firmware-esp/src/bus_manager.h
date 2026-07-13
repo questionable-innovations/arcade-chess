@@ -53,7 +53,9 @@ class BusManager {
   uint8_t globalSquare(uint8_t node, uint8_t local) const;
   bool locateGlobal(uint8_t global, uint8_t& node, uint8_t& local) const;
   const QuadrantState& node(uint8_t index) const { return nodes_[index]; }
-  bool isOnline(uint8_t node) const { return node < 4 && nodes_[node].online; }
+  bool isOnline(uint8_t node) const {
+    return node < arcade::kQuadrantCount && nodes_[node].online;
+  }
   uint8_t onlineMask() const;
   uint8_t onlineCount() const;
   uint8_t rawTargetMask() const { return raw_target_mask_; }

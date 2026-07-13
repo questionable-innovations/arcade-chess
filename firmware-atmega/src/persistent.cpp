@@ -10,9 +10,15 @@ namespace {
 constexpr uint32_t kIdentityMagic = 0x51434944UL;  // QCID
 constexpr uint32_t kSettingsMagic = 0x51434346UL;  // QCCF
 constexpr uint32_t kUpdateMagic = 0x51435550UL;    // QCUP
+constexpr uint8_t kStorageVersion = 1;
+constexpr uint16_t kCrcInitialValue = UINT16_MAX;
+constexpr uint16_t kCrcPolynomial = 0x1021;
+constexpr uint16_t kCrcTopBit = 0x8000;
+constexpr uint8_t kBitsPerByte = 8;
 
 bool validUpdateMarker(const UpdateMarker& marker) {
-  return marker.magic == kUpdateMagic && marker.version == 1 && marker.node_id < 4 &&
+  return marker.magic == kUpdateMagic && marker.version == kStorageVersion &&
+         marker.node_id < arcade::kQuadrantCount &&
          static_cast<uint8_t>(marker.state) <= static_cast<uint8_t>(UpdateState::kValid) &&
          marker.crc == storageCrc(reinterpret_cast<const uint8_t*>(&marker),
                                   sizeof(marker) - sizeof(marker.crc));
@@ -24,11 +30,12 @@ bool generationNewer(uint8_t candidate, uint8_t current) {
 }
 
 uint16_t storageCrc(const uint8_t* bytes, size_t length) {
-  uint16_t crc = 0xffff;
+  // CRC-16/CCITT detects torn or corrupted EEPROM records before they are used.
+  uint16_t crc = kCrcInitialValue;
   for (size_t i = 0; i < length; ++i) {
     crc ^= static_cast<uint16_t>(bytes[i]) << 8;
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
+    for (uint8_t bit = 0; bit < kBitsPerByte; ++bit) {
+      crc = (crc & kCrcTopBit) ? static_cast<uint16_t>((crc << 1) ^ kCrcPolynomial)
                            : static_cast<uint16_t>(crc << 1);
     }
   }
@@ -37,8 +44,8 @@ uint16_t storageCrc(const uint8_t* bytes, size_t length) {
 
 bool loadIdentity(Identity& identity) {
   EEPROM.get(kIdentityEepromAddress, identity);
-  return identity.magic == kIdentityMagic && identity.version == 1 &&
-         identity.node_id < 4 &&
+  return identity.magic == kIdentityMagic && identity.version == kStorageVersion &&
+         identity.node_id < arcade::kQuadrantCount &&
          identity.crc == storageCrc(reinterpret_cast<const uint8_t*>(&identity),
                                     sizeof(identity) - sizeof(identity.crc));
 }
@@ -46,7 +53,7 @@ bool loadIdentity(Identity& identity) {
 void loadDefaultSettings(Settings& s) {
   memset(&s, 0, sizeof(s));
   s.magic = kSettingsMagic;
-  s.version = 1;
+  s.version = kStorageVersion;
   s.enter_threshold = bringup::kDefaultEnterThreshold;
   s.exit_threshold = bringup::kDefaultExitThreshold;
   s.debounce_scans = bringup::kDefaultDebounceScans;
@@ -64,7 +71,8 @@ void loadDefaultSettings(Settings& s) {
 
 bool loadSettings(Settings& settings) {
   EEPROM.get(kSettingsEepromAddress, settings);
-  const bool valid = settings.magic == kSettingsMagic && settings.version == 1 &&
+  const bool valid = settings.magic == kSettingsMagic &&
+      settings.version == kStorageVersion &&
       settings.enter_threshold >= bringup::kMinimumEnterThreshold &&
       settings.enter_threshold <= bringup::kMaximumEnterThreshold &&
       settings.exit_threshold < settings.enter_threshold &&
@@ -80,7 +88,7 @@ bool loadSettings(Settings& settings) {
 
 void saveSettings(Settings& settings) {
   settings.magic = kSettingsMagic;
-  settings.version = 1;
+  settings.version = kStorageVersion;
   settings.crc = storageCrc(reinterpret_cast<const uint8_t*>(&settings),
                             sizeof(settings) - sizeof(settings.crc));
   EEPROM.put(kSettingsEepromAddress, settings);
@@ -104,7 +112,7 @@ void saveUpdateMarker(UpdateMarker& marker) {
   UpdateMarker current{};
   const bool had_current = loadUpdateMarker(current);
   marker.magic = kUpdateMagic;
-  marker.version = 1;
+  marker.version = kStorageVersion;
   marker.generation = had_current ? static_cast<uint8_t>(current.generation + 1) : 0;
   marker.crc = storageCrc(reinterpret_cast<const uint8_t*>(&marker),
                           sizeof(marker) - sizeof(marker.crc));

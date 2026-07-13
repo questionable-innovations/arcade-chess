@@ -41,8 +41,9 @@ void Console::setMode(const char* value) {
   config_->save(*preferences_);
   bus_->setRuntimeMode(mode);
   network_->setRuntimeMode(mode);
-  for (uint8_t node = 0; node < 4; ++node) if (bus_->isOnline(node)) {
-    bus_->setConfig(node, 10, static_cast<uint8_t>(mode));
+  for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) if (bus_->isOnline(node)) {
+    bus_->setConfig(node, arcade::configKey(arcade::ConfigKey::kRuntimeMode),
+                    static_cast<uint8_t>(mode));
   }
   Serial.printf("mode=%s saved; %u online quadrant update(s) queued\n",
                 mode == arcade::RuntimeMode::kBringup ? "bringup" : "normal",
@@ -66,7 +67,7 @@ void Console::execute(char* line) {
       config_->runtime_mode == arcade::RuntimeMode::kBringup ? "bringup" : "normal",
       bus_->goodFrames(), bus_->badFrames(), bus_->timeoutCount(), bus_->busy());
   } else if (!strcmp(command, "nodes")) {
-    for (uint8_t i = 0; i < 4; ++i) {
+    for (uint8_t i = 0; i < arcade::kQuadrantCount; ++i) {
       const QuadrantState& q = bus_->node(i);
       Serial.printf("node=%u online=%u calibrated=%u last_seen=%u timeouts=%u consecutive=%u sync=%u raw_valid=%u\n",
                     i, q.online, q.calibrated, q.last_seen_ms, q.timeouts,
@@ -80,7 +81,7 @@ void Console::execute(char* line) {
   } else if (!strcmp(command, "calibrate")) {
     const char* value = strtok_r(nullptr, " ", &save);
     if (value && !strcmp(value, "all")) {
-      for (uint8_t i = 0; i < 4; ++i) {
+      for (uint8_t i = 0; i < arcade::kQuadrantCount; ++i) {
         if (bus_->isOnline(i)) bus_->calibrate(i);
       }
     } else if (value) {
@@ -101,7 +102,8 @@ void Console::execute(char* line) {
     if (node && key && value) {
       const uint8_t n = atoi(node), k = atoi(key); const uint16_t v = atoi(value);
       bus_->setConfig(n, k, v);
-      if (n < 4 && k == 9 && v < 8) {
+      if (n < arcade::kQuadrantCount &&
+          k == arcade::configKey(arcade::ConfigKey::kOrientation) && v < 8) {
         config_->orientation[n] = v;
         config_->save(*preferences_);
         bus_->setOrientation(n, v);

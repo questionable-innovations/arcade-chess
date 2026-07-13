@@ -4,6 +4,14 @@
 #include <WiFi.h>
 #include <esp_system.h>
 
+namespace {
+constexpr uint32_t kWebSocketReconnectMs = 1000;
+constexpr uint32_t kHeartbeatPingIntervalMs = 15000;
+constexpr uint32_t kHeartbeatPongTimeoutMs = 3000;
+constexpr uint8_t kHeartbeatMissLimit = 2;
+constexpr uint32_t kStatusPublishIntervalMs = 15000;
+}
+
 void NetworkManager::begin(AppConfig& config, BusManager& bus) {
   config_ = &config;
   bus_ = &bus;
@@ -29,8 +37,9 @@ void NetworkManager::connectWebSocket() {
   websocket_.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
     onEvent(type, payload, length);
   });
-  websocket_.setReconnectInterval(1000);
-  websocket_.enableHeartbeat(15000, 3000, 2);
+  websocket_.setReconnectInterval(kWebSocketReconnectMs);
+  websocket_.enableHeartbeat(kHeartbeatPingIntervalMs, kHeartbeatPongTimeoutMs,
+                             kHeartbeatMissLimit);
   websocket_started_ = true;
   Serial.printf("[%10lu][I][WS] connecting wss://%s:%u%s\n", millis(),
                 config_->websocket_host.c_str(), config_->websocket_port,
@@ -58,7 +67,7 @@ void NetworkManager::tick(uint32_t now_ms) {
     doc["data"]["mode"] = runtime_mode_ == arcade::RuntimeMode::kBringup
         ? "bringup" : "normal";
     String json; serializeJson(doc, json); sendJson(json);
-    next_status_ms_ = now_ms + 15000;
+    next_status_ms_ = now_ms + kStatusPublishIntervalMs;
   }
   if (raw_stream_enabled_ && (!raw_stream_until_ms_ ||
       static_cast<int32_t>(raw_stream_until_ms_ - now_ms) > 0) &&
@@ -138,7 +147,7 @@ void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
   JsonArray baseline = data["baseline_adc"].to<JsonArray>();
   JsonArray noise = data["noise_adc"].to<JsonArray>();
   JsonArray states = data["state"].to<JsonArray>();
-  for (uint8_t global = 0; global < 64; ++global) {
+  for (uint8_t global = 0; global < arcade::kBoardSquareCount; ++global) {
     uint8_t node = 0, local = 0;
     bus_->locateGlobal(global, node, local);
     const QuadrantState& q = bus_->node(node);
@@ -163,13 +172,13 @@ void NetworkManager::publishSnapshot() {
   JsonArray nodes = data["nodes"].to<JsonArray>();
   data["online_node_mask"] = bus_->onlineMask();
   data["online_node_count"] = bus_->onlineCount();
-  for (uint8_t node = 0; node < 4; ++node) {
+  for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
     const QuadrantState& q = bus_->node(node);
     JsonObject summary = nodes.add<JsonObject>();
     summary["node"] = node; summary["online"] = q.online;
     summary["calibrated"] = q.calibrated; summary["timeouts"] = q.timeouts;
   }
-  for (uint8_t global = 0; global < 64; ++global) {
+  for (uint8_t global = 0; global < arcade::kBoardSquareCount; ++global) {
     uint8_t node = 0, local = 0; bus_->locateGlobal(global, node, local);
     const QuadrantState& q = bus_->node(node);
     const auto state = q.state[local];

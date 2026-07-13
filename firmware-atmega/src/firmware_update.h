@@ -31,7 +31,7 @@ class FirmwareUpdate {
   UpdateMarker marker_{};
   bool reset_pending_ = false;
   bool maintenance_active_ = false;
-  uint8_t maintenance_target_ = 0xff;
+  uint8_t maintenance_target_ = arcade::kInvalidNodeAddress;
   uint32_t maintenance_token_ = 0;
   uint32_t maintenance_until_ms_ = 0;
 };

@@ -36,13 +36,7 @@ struct __attribute__((packed)) Settings {
   uint16_t crc;
 };
 
-enum class UpdateState : uint8_t {
-  kNone = 0,
-  kRequested = 1,
-  kProgramming = 2,
-  kCandidate = 3,
-  kValid = 4,
-};
+using UpdateState = arcade::FirmwareState;
 
 struct __attribute__((packed)) UpdateMarker {
   uint32_t magic;

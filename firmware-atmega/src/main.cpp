@@ -19,7 +19,7 @@ quadrant::Diagnostics diagnostics(identity, settings, sensors);
 }
 
 void setup() {
-  if (!quadrant::loadIdentity(identity)) identity.node_id = 0xff;
+  if (!quadrant::loadIdentity(identity)) identity.node_id = arcade::kInvalidNodeAddress;
   quadrant::loadSettings(settings);
 #ifdef ARCADE_STANDALONE_ASCII_DEBUG
   settings.runtime_mode = arcade::RuntimeMode::kBringup;

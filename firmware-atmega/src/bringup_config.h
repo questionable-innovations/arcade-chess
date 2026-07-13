@@ -5,7 +5,7 @@
 
 namespace bringup {
 
-constexpr uint32_t kBusBaud = 38400;
+constexpr uint32_t kBusBaud = arcade::kBusBaud;
 constexpr uint16_t kDefaultEnterThreshold = 70;
 constexpr uint16_t kDefaultExitThreshold = 42;
 constexpr uint8_t kDefaultDebounceScans = 3;
@@ -18,6 +18,7 @@ constexpr uint8_t kCalibrationScans = 128;
 constexpr uint16_t kMaximumCalibrationNoise = 40;
 constexpr uint8_t kEventQueueSize = 16;
 constexpr uint8_t kLedFramesPerSecond = arcade::kRenderFramesPerSecond;
+constexpr uint16_t kDiagnosticDumpIntervalMs = 250;
 constexpr uint8_t kMuxChannelCount = 8;
 constexpr uint8_t kPixelsPerSquare = 2;
 constexpr uint8_t kSquareStripPixels = arcade::kSquaresPerQuadrant * kPixelsPerSquare;

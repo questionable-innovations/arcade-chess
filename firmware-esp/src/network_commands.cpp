@@ -4,6 +4,12 @@
 #include <Preferences.h>
 #include <string.h>
 
+namespace {
+constexpr size_t kMaximumCommandBytes = 2048;
+constexpr uint16_t kDefaultIdentifyMs = 3000;
+constexpr uint16_t kRestartFlushMs = 50;
+}
+
 void NetworkManager::sendResult(const char* id, const char* status, const char* reason) {
   if (!welcomed_) return;
   JsonDocument doc;
@@ -20,7 +26,7 @@ void NetworkManager::commandComplete(const char* id, bool ok, const char* reason
 }
 
 void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
-  if (length > 2048) return;
+  if (length > kMaximumCommandBytes) return;
   JsonDocument doc;
   if (deserializeJson(doc, payload, length) || doc["v"].as<int>() != 1) return;
   const char* message_type = doc["type"] | "";
@@ -66,37 +72,43 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     accepted = true;
     const uint8_t online = bus_->onlineMask();
     int8_t last = -1;
-    for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node)) last = node;
-    for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node))
-      accepted &= bus_->setConfig(node, 10, static_cast<uint8_t>(mode),
+    for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node)
+      if (online & (1U << node)) last = node;
+    for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node)
+      if (online & (1U << node))
+      accepted &= bus_->setConfig(node,
+                                  arcade::configKey(arcade::ConfigKey::kRuntimeMode),
+                                  static_cast<uint8_t>(mode),
                                   node == last ? id : nullptr);
   } else if (!strcmp(name, "calibration.start")) {
     if (args["node"].is<const char*>() && !strcmp(args["node"], "all")) {
       const uint8_t online = bus_->onlineMask();
       int8_t last = -1;
-      for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node)) last = node;
+      for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node)
+        if (online & (1U << node)) last = node;
       accepted = online != 0;
-      for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node))
+      for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node)
+        if (online & (1U << node))
         accepted &= bus_->calibrate(node, node == last ? id : nullptr);
     } else {
-      const uint8_t node = args["node"] | 0xff;
+      const uint8_t node = args["node"] | arcade::kInvalidNodeAddress;
       if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
       accepted = bus_->calibrate(node, id);
     }
   } else if (!strcmp(name, "node.identify")) {
-    const uint8_t node = args["node"] | 0xff;
+    const uint8_t node = args["node"] | arcade::kInvalidNodeAddress;
     if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
-    accepted = bus_->identify(node, args["duration_ms"] | 3000, id);
+    accepted = bus_->identify(node, args["duration_ms"] | kDefaultIdentifyMs, id);
   } else if (!strcmp(name, "lighting.set")) {
-    uint8_t squares[64]; size_t count = 0;
+    uint8_t squares[arcade::kBoardSquareCount]; size_t count = 0;
     for (JsonVariant square : args["squares"].as<JsonArray>())
-      if (count < 64) squares[count++] = square.as<uint8_t>();
+      if (count < arcade::kBoardSquareCount) squares[count++] = square.as<uint8_t>();
     const uint32_t colour = strtoul(args["colour"] | "000000", nullptr, 16);
     accepted = bus_->setGlobalSquares(squares, count, colour >> 16, colour >> 8, colour,
                                       args["duration_ms"] | 0, id);
   } else if (!strcmp(name, "device.restart") &&
              !strcmp(args["confirm"] | "", "restart")) {
-    sendResult(id, "accepted"); delay(50); ESP.restart();
+    sendResult(id, "accepted"); delay(kRestartFlushMs); ESP.restart();
   }
 
   if (accepted) sendResult(id, "accepted");
