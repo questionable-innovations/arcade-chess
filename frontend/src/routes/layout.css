@@ -1,1 +1,74 @@
 @import 'tailwindcss';
+
+/* ── Design tokens ───────────────────────────────────────────────────────────
+   "Precision instrument" — a warm near-black control surface. The board is the
+   hero; chrome recedes. Signal colours are muted, never obnoxious. */
+@theme {
+	--font-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+	/* Surfaces */
+	--color-ink: #08090a;
+	--color-void: #0a0b0c;
+	--color-surface: #101214;
+	--color-surface-2: #16191c;
+	--color-line: #21262a;
+	--color-line-soft: #191d20;
+
+	/* Text */
+	--color-fg: #e9ecee;
+	--color-fg-dim: #9aa0a6;
+	--color-fg-faint: #5b6167;
+	--color-fg-ghost: #3a4045;
+
+	/* Board squares — muted matte, real-board contrast without the shout */
+	--color-sq-light: #30343a;
+	--color-sq-dark: #1a1d21;
+
+	/* Piece-present square fills. Whole-square, flat, calm. */
+	--color-pos: #6ea77c; /* muted sage green  — positive polarity */
+	--color-neg: #7f8ac0; /* muted slate blue  — negative polarity */
+	--color-uncertain: #565b62; /* neutral grey — unresolved */
+
+	/* Signals */
+	--color-live: #7fc8a0;
+	--color-warn: #d6a35c;
+	--color-fault: #cf6a5f;
+	--color-probe: #5aa9d6;
+}
+
+:root {
+	color-scheme: dark;
+}
+
+html,
+body {
+	height: 100%;
+}
+
+body {
+	margin: 0;
+	background:
+		radial-gradient(120% 90% at 50% -10%, #121517 0%, transparent 60%),
+		radial-gradient(140% 120% at 50% 120%, #0d1012 0%, transparent 55%), var(--color-void);
+	background-attachment: fixed;
+	color: var(--color-fg);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+
+/* Fine grain overlay for texture — kept extremely subtle. */
+body::before {
+	content: '';
+	position: fixed;
+	inset: 0;
+	z-index: 0;
+	pointer-events: none;
+	opacity: 0.025;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.tnum {
+	font-variant-numeric: tabular-nums;
+}
