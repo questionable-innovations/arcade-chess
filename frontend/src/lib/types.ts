@@ -30,7 +30,19 @@ export interface EventData {
 	scan_id?: number | string;
 	complete?: boolean;
 	response_node_mask?: number;
+	online_node_mask?: number;
 	raw_adc?: (number | null)[];
+	baseline_adc?: (number | null)[];
+	noise_adc?: (number | null)[];
+}
+
+// Nominal ADC reference for the derived-volts readout during bring-up. AVCC and
+// analog gain drift, so raw counts stay authoritative; volts are an estimate.
+export const AVCC_MV = 3300;
+
+export function adcToVolts(adc: number | null | undefined): number | null {
+	if (adc == null) return null;
+	return (adc * AVCC_MV) / 1023 / 1000;
 }
 
 // A device event envelope, relayed verbatim by the server.

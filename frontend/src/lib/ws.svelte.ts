@@ -11,11 +11,25 @@ interface TickEntry {
 	id: number;
 	at: string;
 	text: string;
+	level: 'info' | 'warn' | 'error' | 'event';
 }
 
 const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 15000;
 const STABLE_MS = 5000;
+const LOG_MAX = 250;
+
+// Classify an envelope for log colour-coding in the debug console.
+function levelOf(env: Envelope): TickEntry['level'] {
+	if (env.type === 'diagnostic.log') {
+		const l = (env.data?.level ?? '').toLowerCase();
+		if (l === 'error' || l === 'fatal') return 'error';
+		if (l === 'warn' || l === 'warning') return 'warn';
+	}
+	if (env.type === 'command.result' && env.status && env.status !== 'applied') return 'warn';
+	if (env.type === 'calibration.result' && env.data?.ok === false) return 'error';
+	return 'event';
+}
 
 function resolveUrl(): string {
 	const override = new URLSearchParams(location.search).get('backend');
@@ -90,6 +104,7 @@ class WsStore {
 	devices = $state<Record<string, DeviceState>>({});
 	order = $state<string[]>([]);
 	events = $state<TickEntry[]>([]);
+	streaming = $state(false);
 
 	#socket: WebSocket | null = null;
 	#backoff = BACKOFF_MIN;
@@ -100,6 +115,11 @@ class WsStore {
 	connect(): void {
 		if (this.#started) return;
 		this.#started = true;
+		// Offline design/QA harness — populate a realistic board without hardware.
+		if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo')) {
+			this.#loadDemo();
+			return;
+		}
 		this.#open();
 	}
 
@@ -114,6 +134,27 @@ class WsStore {
 			device_id: deviceId,
 			name: 'lighting.set',
 			args: { squares: [square], effect: 'solid', colour: '00a0ff', duration_ms: 3000 }
+		});
+	}
+
+	// One averaged raw voltage scan of every online square.
+	rawScan(deviceId: string): void {
+		this.#send({
+			type: 'command',
+			device_id: deviceId,
+			name: 'sensor.raw_scan.get',
+			args: { samples_per_square: 4 }
+		});
+	}
+
+	// Toggle continuous raw voltage streaming for the live debug readout.
+	setStream(deviceId: string, enabled: boolean): void {
+		this.streaming = enabled;
+		this.#send({
+			type: 'command',
+			device_id: deviceId,
+			name: 'sensor.raw_stream.set',
+			args: { enabled, interval_ms: 500, samples_per_square: 2 }
 		});
 	}
 
@@ -216,21 +257,21 @@ class WsStore {
 			// snapshot from each device on client connect; the replay bridges the window
 			// until that snapshot arrives.
 			for (const env of recent) applyEvent(dev, env);
-			for (const env of recent.slice(-8)) ticks.push(this.#makeTick(env));
+			for (const env of recent.slice(-LOG_MAX)) ticks.push(this.#makeTick(env));
 			if (recent.length) dev.lastEventAt = Date.now();
 			devices[dv.device_id] = dev;
 			order.push(dv.device_id);
 		}
 		this.devices = devices;
 		this.order = order;
-		this.events = ticks.reverse().slice(0, 8);
+		this.events = ticks.reverse().slice(0, LOG_MAX);
 	}
 
 	#handleEvent(deviceId: string, env: Envelope): void {
 		const dev = this.#ensure(deviceId);
 		applyEvent(dev, env);
 		dev.lastEventAt = Date.now();
-		this.events = [this.#makeTick(env), ...this.events].slice(0, 8);
+		this.events = [this.#makeTick(env), ...this.events].slice(0, LOG_MAX);
 	}
 
 	#setConnected(deviceId: string, value: boolean): void {
@@ -251,12 +292,90 @@ class WsStore {
 		return {
 			id: this.#tickId++,
 			at: env.at_ms != null ? String(env.at_ms) : '·',
-			text: summarize(env)
+			text: summarize(env),
+			level: levelOf(env)
 		};
 	}
 
-	#pushInfo(text: string): void {
-		this.events = [{ id: this.#tickId++, at: '·', text }, ...this.events].slice(0, 8);
+	#pushInfo(text: string, level: TickEntry['level'] = 'info'): void {
+		this.events = [{ id: this.#tickId++, at: '·', text, level }, ...this.events].slice(0, LOG_MAX);
+	}
+
+	// ── Offline demo harness ──────────────────────────────────────────────────
+	// Builds a plausible full-board state so the interface can be reviewed and
+	// screenshotted without a live device. Activated by the `?demo` query flag.
+	#loadDemo(): void {
+		this.connected = true;
+		const dev = emptyDevice('arcade-chess-001');
+		dev.connected = true;
+		dev.bootId = '7e4c18b2';
+		dev.seq = 412;
+		dev.lastEventAt = Date.now();
+
+		// Standard opening position: back two ranks each side carry pieces.
+		const pos = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+		const neg = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63];
+		for (const i of pos) dev.squares[i] = 'positive';
+		for (const i of neg) dev.squares[i] = 'negative';
+		dev.squares[27] = 'uncertain';
+		dev.valid[42] = false;
+
+		for (let n = 0; n < 4; n++) {
+			dev.node_status[n] = {
+				type: 'node.status',
+				seq: 100 + n,
+				at_ms: 60000,
+				data: { node: n, online: true, calibrated: n !== 2, firmware: '0.1.0' }
+			};
+		}
+		dev.device_status = {
+			type: 'device.status',
+			data: { rssi: -58, heap: 184320, uptime: 4210 }
+		};
+		dev.raw_scan = {
+			type: 'sensor.raw_scan',
+			data: {
+				scan_id: 7,
+				complete: true,
+				response_node_mask: 0b1111,
+				raw_adc: Array.from({ length: 64 }, (_, i) => {
+					const active = dev.squares[i] === 'positive' || dev.squares[i] === 'negative';
+					// Deterministic pseudo-noise so the readout looks alive but stable.
+					const jitter = ((i * 37) % 23) - 11;
+					return active ? 690 + jitter : 205 + Math.floor(jitter / 2);
+				})
+			}
+		};
+
+		this.devices = { 'arcade-chess-001': dev };
+		this.order = ['arcade-chess-001'];
+		this.events = [
+			{ type: 'device.status', data: { rssi: -58, heap: 184320, uptime: 4210 }, at_ms: 60000 },
+			{ type: 'node.status', data: { node: 2, online: true, calibrated: false }, at_ms: 59120 },
+			{
+				type: 'diagnostic.log',
+				data: { level: 'warn', component: 'node2', message: 'awaiting calibration' },
+				at_ms: 58900
+			},
+			{
+				type: 'sensor.changed',
+				seq: 412,
+				data: { square: 27, state: 'uncertain', raw: 471 },
+				at_ms: 58400
+			},
+			{
+				type: 'sensor.raw_scan',
+				data: { scan_id: 7, complete: true, response_node_mask: 15 },
+				at_ms: 57800
+			},
+			{
+				type: 'sensor.changed',
+				seq: 411,
+				data: { square: 12, state: 'positive', raw: 702 },
+				at_ms: 57200
+			},
+			{ type: 'board.snapshot', seq: 410, data: { valid: dev.valid }, at_ms: 56000 }
+		].map((e) => this.#makeTick(e as Envelope));
 	}
 }
 
