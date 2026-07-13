@@ -332,17 +332,24 @@ class WsStore {
 			type: 'device.status',
 			data: { rssi: -58, heap: 184320, uptime: 4210 }
 		};
+		// Op-amp centres each square at ~512 (2.5 V mid-rail); a piece pushes the
+		// reading ±~285 counts by polarity. Empty squares hover in the deadband.
 		dev.raw_scan = {
 			type: 'sensor.raw_scan',
 			data: {
 				scan_id: 7,
 				complete: true,
 				response_node_mask: 0b1111,
+				baseline_adc: Array.from({ length: 64 }, () => 512),
+				noise_adc: Array.from({ length: 64 }, (_, i) => 3 + ((i * 7) % 4)),
 				raw_adc: Array.from({ length: 64 }, (_, i) => {
-					const active = dev.squares[i] === 'positive' || dev.squares[i] === 'negative';
 					// Deterministic pseudo-noise so the readout looks alive but stable.
 					const jitter = ((i * 37) % 23) - 11;
-					return active ? 690 + jitter : 205 + Math.floor(jitter / 2);
+					const s = dev.squares[i];
+					if (s === 'positive') return 512 + 285 + jitter;
+					if (s === 'negative') return 512 - 285 + jitter;
+					if (s === 'uncertain') return 512 + 58 + jitter; // near the enter threshold
+					return 512 + Math.round(jitter / 3); // empty: inside the deadband
 				})
 			}
 		};

@@ -1,12 +1,22 @@
 <script lang="ts">
-	import { nodeHealth, adcToVolts, type Envelope, type SquareState } from './types';
+	import {
+		nodeHealth,
+		polarityColor,
+		ADC_CENTER,
+		AVCC_MV,
+		type Envelope,
+		type SquareState
+	} from './types';
 
 	let {
 		squares,
 		valid,
 		nodeStatus,
 		rawAdc = null,
+		baselineAdc = null,
 		debug = false,
+		heatmap = false,
+		heatSpan = 512,
 		admin = false,
 		onSquare
 	}: {
@@ -14,10 +24,66 @@
 		valid: boolean[];
 		nodeStatus: (Envelope | null)[];
 		rawAdc?: (number | null)[] | null;
+		baselineAdc?: (number | null)[] | null;
 		debug?: boolean;
+		heatmap?: boolean;
+		heatSpan?: number;
 		admin?: boolean;
 		onSquare: (i: number) => void;
 	} = $props();
+
+	const heatOn = $derived(debug && heatmap && !!rawAdc);
+
+	// Signed deviation from the square's centre (its baseline, else the mid-rail),
+	// in raw ADC counts. Positive = above centre, negative = below.
+	function deviation(i: number): number | null {
+		const adc = rawAdc?.[i];
+		if (adc == null) return null;
+		const centre = baselineAdc?.[i] ?? ADC_CENTER;
+		return adc - centre;
+	}
+
+	// Normalised polarity in [-1, +1] for the diverging colour ramp.
+	function heatT(i: number): number | null {
+		const d = deviation(i);
+		if (d == null) return null;
+		return heatSpan > 0 ? d / heatSpan : 0;
+	}
+
+	// Cell fill in heatmap mode; undefined lets the state/base CSS win otherwise.
+	function fillOf(i: number): string | undefined {
+		if (!heatOn) return undefined;
+		const t = heatT(i);
+		return t == null ? undefined : polarityColor(t);
+	}
+
+	// Keep the overlaid number legible against a saturated pole.
+	function inkOf(i: number): string | undefined {
+		if (!heatOn) return undefined;
+		const t = heatT(i);
+		if (t == null) return undefined;
+		return Math.abs(t) > 0.62 ? 'rgba(9, 13, 16, 0.9)' : 'rgba(233, 236, 238, 0.86)';
+	}
+
+	// Signed deviation voltage (± around centre) — the meaningful readout here.
+	function devVolts(i: number): number | null {
+		const d = deviation(i);
+		return d == null ? null : (d * AVCC_MV) / 1023 / 1000;
+	}
+
+	function voltLabel(i: number): string {
+		const v = devVolts(i);
+		if (v == null) return '—';
+		const s = v >= 0 ? '+' : '−';
+		return `${s}${Math.abs(v).toFixed(2)}`;
+	}
+
+	function cellTitle(i: number, file: string, rank: number): string {
+		const v = devVolts(i);
+		if (v == null) return `${file}${rank}`;
+		const s = v >= 0 ? '+' : '−';
+		return `${file}${rank} · ${s}${Math.abs(v).toFixed(3)} V · adc ${rawAdc?.[i]}`;
+	}
 
 	const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 	const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
@@ -40,11 +106,6 @@
 	function nodeDown(node: number): boolean {
 		return nodeHealth(nodeStatus[node]) === 'offline';
 	}
-
-	function voltLabel(i: number): string {
-		const v = adcToVolts(rawAdc?.[i]);
-		return v == null ? '—' : v.toFixed(2);
-	}
 </script>
 
 <div class="wrap" class:debug>
@@ -58,12 +119,15 @@
 				class="sq {cell.dark ? 'dark' : 'light'} {squares[cell.i]}"
 				class:down={nodeDown(cell.node)}
 				class:invalid={!valid[cell.i]}
+				class:heat={heatOn}
+				style:background={fillOf(cell.i)}
 				disabled={!admin}
 				onclick={() => onSquare(cell.i)}
 				aria-label={`${files[cell.col]}${cell.row + 1} ${squares[cell.i]}`}
+				title={debug ? cellTitle(cell.i, files[cell.col], cell.row + 1) : undefined}
 			>
 				{#if debug && rawAdc}
-					<span class="volt">{voltLabel(cell.i)}</span>
+					<span class="volt" style:color={inkOf(cell.i)}>{voltLabel(cell.i)}</span>
 				{/if}
 				{#if !valid[cell.i]}<span class="flag" title="invalid reading"></span>{/if}
 			</button>

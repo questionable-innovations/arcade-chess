@@ -2,7 +2,15 @@
 	import Board from '$lib/Board.svelte';
 	import Console from '$lib/Console.svelte';
 	import { ws } from '$lib/ws.svelte';
-	import { nodeHealth, type DeviceState, type Envelope, type SquareState } from '$lib/types';
+	import {
+		nodeHealth,
+		adcToVolts,
+		FULL_SWING_COUNTS,
+		POLARITY_GRADIENT,
+		type DeviceState,
+		type Envelope,
+		type SquareState
+	} from '$lib/types';
 
 	const emptySquares: SquareState[] = Array.from({ length: 64 }, () => 'empty');
 	const emptyValid: boolean[] = Array.from({ length: 64 }, () => true);
@@ -14,6 +22,9 @@
 	);
 	let adminOpen = $state(false);
 	let password = $state('');
+	let heatmap = $state(
+		typeof location !== 'undefined' && new URLSearchParams(location.search).has('heatmap')
+	);
 
 	$effect(() => {
 		ws.connect();
@@ -39,7 +50,14 @@
 	});
 
 	const rawAdc = $derived(selected?.raw_scan?.data?.raw_adc ?? null);
+	const baselineAdc = $derived(selected?.raw_scan?.data?.baseline_adc ?? null);
 	const rawScan = $derived(selected?.raw_scan ?? null);
+
+	// Diverging colour full-scale is anchored to the physical conditioned swing
+	// (±~307 counts ≈ ±1.5 V), so a square's colour maps to real polarity
+	// magnitude and stays stable frame-to-frame while streaming.
+	const heatSpan = FULL_SWING_COUNTS;
+	const heatSpanVolts = adcToVolts(heatSpan) ?? 0;
 
 	const nodesOnline = $derived.by(() => {
 		if (!selected) return 0;
@@ -59,6 +77,14 @@
 
 	function onSquare(i: number) {
 		if (ws.authed && selected) ws.probe(selected.device_id, i);
+	}
+
+	// Streaming and the heatmap go together — turning the live scan on lights it up.
+	function toggleStream() {
+		if (!selected) return;
+		const on = !ws.streaming;
+		ws.setStream(selected.device_id, on);
+		if (on) heatmap = true;
 	}
 
 	function ageLabel(dev: DeviceState): string {
@@ -135,7 +161,10 @@
 				valid={selected?.valid ?? emptyValid}
 				nodeStatus={selected?.node_status ?? emptyNodes}
 				rawAdc={debug ? rawAdc : null}
+				{baselineAdc}
 				{debug}
+				{heatmap}
+				{heatSpan}
 				admin={ws.authed}
 				{onSquare}
 			/>
@@ -200,12 +229,20 @@
 				</div>
 
 				<div class="card">
-					<h3>Voltages</h3>
+					<div class="cardhead">
+						<h3>Voltages</h3>
+						<button
+							class="chip"
+							class:active={heatmap}
+							disabled={!rawScan}
+							onclick={() => (heatmap = !heatmap)}>heatmap</button
+						>
+					</div>
 					<div class="scanmeta tnum">
 						{#if rawScan}
 							scan {rawScan.data?.scan_id ?? '—'} · {rawScan.data?.complete
 								? 'complete'
-								: 'partial'} · mask {rawScan.data?.response_node_mask ?? '—'}
+								: 'partial'} · ±{(heatSpanVolts ?? 0).toFixed(2)}V full-scale
 						{:else}
 							no scan yet
 						{/if}
@@ -220,15 +257,15 @@
 							class="btn"
 							class:active={ws.streaming}
 							disabled={!ws.authed || !selected}
-							onclick={() => selected && ws.setStream(selected.device_id, !ws.streaming)}
-							>{ws.streaming ? 'Streaming' : 'Stream'}</button
+							onclick={toggleStream}>{ws.streaming ? 'Streaming' : 'Stream'}</button
 						>
 					</div>
 					{#if !ws.authed}<p class="note">authenticate as admin to drive scans</p>{/if}
+					<!-- Diverging legend: negative polarity ← centre → positive polarity. -->
 					<div class="scale">
-						<span class="tnum">0V</span>
-						<span class="bar"></span>
-						<span class="tnum">3.3V</span>
+						<span class="pole neg">− neg</span>
+						<span class="bar" style:background={POLARITY_GRADIENT}></span>
+						<span class="pole pos">pos +</span>
 					</div>
 				</div>
 			</aside>
@@ -440,6 +477,43 @@
 		text-transform: uppercase;
 		color: var(--color-fg-dim);
 	}
+	.cardhead {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 10px;
+	}
+	.cardhead h3 {
+		margin: 0;
+	}
+	.chip {
+		height: 22px;
+		padding: 0 10px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		letter-spacing: 0.04em;
+		color: var(--color-fg-faint);
+		background: var(--color-surface-2);
+		border: 1px solid var(--color-line);
+		border-radius: 999px;
+		cursor: pointer;
+		transition:
+			color 0.15s ease,
+			border-color 0.15s ease,
+			background 0.15s ease;
+	}
+	.chip:hover:not(:disabled) {
+		color: var(--color-fg);
+	}
+	.chip:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.chip.active {
+		color: var(--color-fg);
+		border-color: color-mix(in srgb, var(--color-pos) 45%, var(--color-line));
+		background: color-mix(in srgb, var(--color-pos) 14%, transparent);
+	}
 	dl {
 		margin: 0;
 		display: flex;
@@ -580,9 +654,17 @@
 	}
 	.scale .bar {
 		flex: 1;
-		height: 5px;
+		height: 6px;
 		border-radius: 3px;
-		background: linear-gradient(90deg, var(--color-sq-dark), var(--color-probe));
+	}
+	.scale .pole {
+		flex: none;
+	}
+	.scale .pole.neg {
+		color: color-mix(in srgb, var(--color-neg) 70%, var(--color-fg-faint));
+	}
+	.scale .pole.pos {
+		color: color-mix(in srgb, var(--color-pos) 70%, var(--color-fg-faint));
 	}
 
 	@media (max-width: 1080px) {
