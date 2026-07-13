@@ -19,6 +19,9 @@ const MAX_DEVICES: usize = 64;
 const DEVICE_RETENTION_MS: u64 = 600_000;
 /// Bounds the set backing unknown-`type` warning dedup.
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 64;
+/// Minimum spacing between client-connect-triggered snapshot refreshes, so a
+/// reconnect-looping browser cannot spam devices with `board.snapshot.get`.
+const SNAPSHOT_REQUEST_DEBOUNCE_MS: u64 = 2_000;
 
 /// Per-device state accumulated from the device WebSocket. Envelopes are stored
 /// verbatim so the client `init`/`event` fan-out matches what the device sent.
@@ -34,9 +37,10 @@ pub struct DeviceEntry {
     pub last_seq: Option<u32>,
     pub cmd_tx: Option<mpsc::UnboundedSender<String>>,
     /// Generation of the connection that currently owns this entry. Guards
-    /// against a stale reconnect's teardown clobbering the live connection.
+    /// against a stale reconnect mutating or tearing down the live connection.
     pub session: u64,
     pub last_active_ms: u64,
+    pub last_snapshot_req_ms: u64,
 }
 
 /// Wire shape for `init.devices[]` and `GET /api/state`.
@@ -97,19 +101,24 @@ impl AppState {
         devices.iter().map(|(id, e)| view(id, e)).collect()
     }
 
-    /// Registers a connection and returns its session generation. The caller
-    /// passes that generation back to `mark_disconnected` so a stale connection
-    /// cannot tear down a newer one for the same `device_id`.
+    /// Registers a connection and returns its session generation, or `None`
+    /// when the device cap is reached and no disconnected entry can be evicted.
+    /// The caller passes that generation back to `ingest_event` and
+    /// `mark_disconnected` so a stale connection cannot mutate or tear down a
+    /// newer one for the same `device_id`.
     pub fn register_device(
         &self,
         device_id: &str,
         hello: Value,
         cmd_tx: mpsc::UnboundedSender<String>,
-    ) -> u64 {
+    ) -> Option<u64> {
         let session = self.session_seq.fetch_add(1, Ordering::Relaxed);
         let mut devices = self.devices.lock().expect("devices lock");
         if !devices.contains_key(device_id) && devices.len() >= MAX_DEVICES {
             evict_oldest_disconnected(&mut devices);
+            if devices.len() >= MAX_DEVICES {
+                return None;
+            }
         }
         let entry = devices.entry(device_id.to_string()).or_default();
         entry.connected = true;
@@ -120,7 +129,7 @@ impl AppState {
         // Reset seq tracking; the device sends a fresh snapshot after welcome.
         entry.boot_id = None;
         entry.last_seq = None;
-        session
+        Some(session)
     }
 
     /// Clears the connection only if `session` still owns the entry. Returns
@@ -162,6 +171,33 @@ impl AppState {
         devices.retain(|_, e| e.connected || e.last_active_ms >= cutoff);
     }
 
+    /// Asks every connected device for a fresh snapshot, debounced per device.
+    /// Run on client connect: the `init` snapshot may predate events the recent
+    /// ring has rotated past, a gap the client cannot recover from on its own.
+    pub fn request_snapshots(&self) {
+        let now = now_ms();
+        let mut devices = self.devices.lock().expect("devices lock");
+        for (id, e) in devices.iter_mut() {
+            let Some(tx) = &e.cmd_tx else { continue };
+            if now.saturating_sub(e.last_snapshot_req_ms) < SNAPSHOT_REQUEST_DEBOUNCE_MS {
+                continue;
+            }
+            let n = self.next_seq();
+            let cmd = json!({
+                "v": 1,
+                "type": "command",
+                "server_seq": n,
+                "id": format!("cmd-{n}"),
+                "name": "board.snapshot.get",
+                "args": {},
+            });
+            if tx.send(cmd.to_string()).is_ok() {
+                e.last_snapshot_req_ms = now;
+                tracing::debug!(device_id = %id, "requested snapshot for new client");
+            }
+        }
+    }
+
     pub fn lookup_device(&self, device_id: &str) -> DeviceLookup {
         let devices = self.devices.lock().expect("devices lock");
         match devices.get(device_id) {
@@ -173,20 +209,26 @@ impl AppState {
         }
     }
 
-    /// Stores the event and returns true when a `(boot_id, seq)` gap or boot
-    /// change means the caller should request a fresh `board.snapshot`.
+    /// Stores the event and returns `Some(true)` when a `(boot_id, seq)` gap or
+    /// boot change means the caller should request a fresh `board.snapshot`.
+    /// Returns `None` (dropping the event) when `session` no longer owns the
+    /// entry, so a superseded connection cannot mutate the live session's state.
     pub fn ingest_event(
         &self,
         device_id: &str,
+        session: u64,
         etype: &str,
         boot_id: Option<&str>,
         seq: Option<u32>,
         event: &Value,
-    ) -> bool {
+    ) -> Option<bool> {
         let mut devices = self.devices.lock().expect("devices lock");
         let Some(entry) = devices.get_mut(device_id) else {
-            return false;
+            return None;
         };
+        if entry.session != session {
+            return None;
+        }
         entry.last_active_ms = now_ms();
 
         match etype {
@@ -213,19 +255,23 @@ impl AppState {
 
         let mut need_snapshot = false;
         if let (Some(b), Some(s)) = (boot_id, seq) {
-            match (entry.boot_id.as_deref(), entry.last_seq) {
-                (Some(prev_b), Some(prev_s)) if prev_b == b => {
-                    if s != prev_s.wrapping_add(1) {
-                        need_snapshot = true;
+            // A snapshot heals a gap rather than opening one: it already
+            // supersedes everything missed, so don't request another.
+            if etype != "board.snapshot" {
+                match (entry.boot_id.as_deref(), entry.last_seq) {
+                    (Some(prev_b), Some(prev_s)) if prev_b == b => {
+                        if s != prev_s.wrapping_add(1) {
+                            need_snapshot = true;
+                        }
                     }
+                    (Some(prev_b), _) if prev_b != b => need_snapshot = true,
+                    _ => {}
                 }
-                (Some(prev_b), _) if prev_b != b => need_snapshot = true,
-                _ => {}
             }
             entry.boot_id = Some(b.to_string());
             entry.last_seq = Some(s);
         }
-        need_snapshot
+        Some(need_snapshot)
     }
 }
 

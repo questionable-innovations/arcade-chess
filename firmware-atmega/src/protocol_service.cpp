@@ -136,11 +136,11 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = 4;
       break;
     case arcade::MessageType::kInfo:
-      response.payload[0] = 0; response.payload[1] = 1; response.payload[2] = 0;
+      response.payload[0] = ARCADE_FW_MAJOR; response.payload[1] = ARCADE_FW_MINOR;
+      response.payload[2] = ARCADE_FW_PATCH;
       response.payload[3] = 0x10; response.payload[4] = identity_.node_id;
       arcade::putU16(response.payload + 5, 0x000f);
-      response.payload[7] = static_cast<uint8_t>(settings_.runtime_mode);
-      response.payload_length = 8;
+      response.payload_length = 7;
       break;
     case arcade::MessageType::kStatus:
       arcade::putU32(response.payload, millis());
@@ -152,8 +152,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       arcade::putU16(response.payload + 11, rx_bad_);
       arcade::putU16(response.payload + 13, sensors_.overflowCount());
       arcade::putU16(response.payload + 15, system_info::supplyMillivolts());
-      response.payload[17] = static_cast<uint8_t>(settings_.runtime_mode);
-      response.payload_length = 18;
+      response.payload_length = 17;
       break;
     case arcade::MessageType::kPollEvents: {
       const uint8_t requested = request.payload_length ? request.payload[0] : 4;
@@ -253,6 +252,14 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       saveSettings(settings_);
       memcpy(response.payload, request.payload, request.payload_length);
       response.payload_length = request.payload_length;
+      break;
+    case arcade::MessageType::kSetDebug:
+      if (request.payload_length != 3) { sendError(request, 1); return; }
+      debug_flags_ = request.payload[0];
+      debug_raw_interval_ms_ = arcade::getU16(request.payload + 1);
+      response.payload[0] = debug_flags_;
+      arcade::putU16(response.payload + 1, debug_raw_interval_ms_);
+      response.payload_length = 3;
       break;
     default: {
       uint8_t error_code = 0;

@@ -6,7 +6,7 @@ namespace {
 constexpr uint8_t kBusRxPin = 17;
 constexpr uint8_t kBusTxPin = 16;
 constexpr uint32_t kBusBaud = arcade::kBusBaud;
-constexpr uint32_t kResponseTimeoutMs = 25;
+constexpr uint32_t kResponseTimeoutMs = 20;
 constexpr uint32_t kOnlinePollIntervalMs = 10;
 constexpr uint32_t kOfflineProbeBaseMs = 1000;
 constexpr uint32_t kOfflineProbeMaximumMs = 10000;
@@ -131,6 +131,30 @@ bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t 
   return any;
 }
 
+bool BusManager::clearGlobalSquares(const uint8_t* squares, size_t count,
+                                    const char* correlation) {
+  const bool all = count == 0;
+  uint16_t masks[4]{};
+  for (size_t i = 0; i < count; ++i) {
+    uint8_t node = 0, local = 0;
+    if (locateGlobal(squares[i], node, local)) masks[node] |= 1U << local;
+  }
+  bool any = false;
+  int8_t last_node = -1;
+  for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
+    if ((all || masks[node]) && nodes_[node].online) last_node = node;
+  }
+  for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
+    if ((!all && !masks[node]) || !nodes_[node].online) continue;
+    uint8_t payload[2];
+    arcade::putU16(payload, masks[node]);
+    any |= enqueue(node, arcade::MessageType::kClearLighting, payload,
+                   all ? 0 : sizeof(payload),
+                   node == last_node ? correlation : nullptr);
+  }
+  return any;
+}
+
 void BusManager::tick(uint32_t now_ms) {
   // During a firmware handoff the STK500 programmer owns the bus UART; framed
   // reception would consume raw programmer bytes.
@@ -174,6 +198,10 @@ void BusManager::send(uint8_t node, arcade::MessageType type, const uint8_t* pay
       ? kRawResponseTimeoutMs
       : slow_eeprom ? kPersistentWriteTimeoutMs : kResponseTimeoutMs);
   copyCorrelation(pending_correlation_, correlation);
+  if (callbacks_.busTrace) {
+    callbacks_.busTrace("tx", node, frame.sequence, type, "sent",
+                        frame.payload, static_cast<uint8_t>(frame.payload_length));
+  }
 }
 
 void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
@@ -199,6 +227,11 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
   }
   bool ok = !(frame.flags & arcade::kError);
   const char* reason = ok ? nullptr : "node_error";
+  if (callbacks_.busTrace) {
+    callbacks_.busTrace("rx", frame.source, frame.sequence, frame.type,
+                        ok ? "ok" : "error", frame.payload,
+                        static_cast<uint8_t>(frame.payload_length));
+  }
 
   if (ok && pending_type_ == arcade::MessageType::kPollEvents && frame.payload_length >= 1) {
       const uint8_t count = frame.payload[0] > kMaximumEventsPerPoll
@@ -227,7 +260,19 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     raw_response_mask_ |= 1U << frame.source;
     finishRawIfReady();
   } else if (ok && pending_type_ == arcade::MessageType::kStatus && frame.payload_length >= 7) {
-    node.calibrated = frame.payload[5] != 0;
+    node.reset_cause = frame.payload[4];
+    const bool calibrated = frame.payload[5] != 0;
+    if (node.calibrated != calibrated) {
+      node.calibrated = calibrated;
+      if (callbacks_.nodeStatusChanged) callbacks_.nodeStatusChanged(frame.source);
+    }
+  } else if (ok && pending_type_ == arcade::MessageType::kInfo &&
+             frame.payload_length >= 3) {
+    const bool changed = !node.fw_known ||
+        memcmp(node.fw_version, frame.payload, sizeof(node.fw_version)) != 0;
+    memcpy(node.fw_version, frame.payload, sizeof(node.fw_version));
+    node.fw_known = true;
+    if (changed && callbacks_.nodeStatusChanged) callbacks_.nodeStatusChanged(frame.source);
   } else if (ok && pending_type_ == arcade::MessageType::kGetSnapshot &&
              frame.payload_length >= kSnapshotPayloadBytes) {
     for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
@@ -252,8 +297,22 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
                   now_ms, frame.source);
   }
   if (!ok && pending_type_ == arcade::MessageType::kFwPrepare) {
+    // Drop only queued firmware-handoff commands; unrelated commands (and their
+    // correlations) must still run to completion.
+    const uint8_t count = queue_count_;
+    uint8_t read = queue_tail_;
+    uint8_t write = queue_tail_;
     queue_count_ = 0;
-    queue_tail_ = queue_head_;
+    for (uint8_t i = 0; i < count; ++i) {
+      const QueuedCommand entry = queue_[read];
+      read = static_cast<uint8_t>((read + 1) % kQueueCapacity);
+      if (entry.type == arcade::MessageType::kFwPrepare ||
+          entry.type == arcade::MessageType::kFwEnterBootloader) continue;
+      queue_[write] = entry;
+      write = static_cast<uint8_t>((write + 1) % kQueueCapacity);
+      ++queue_count_;
+    }
+    queue_head_ = write;
   }
   if ((pending_type_ == arcade::MessageType::kFwHealth ||
        pending_type_ == arcade::MessageType::kFwConfirm ||
@@ -272,6 +331,7 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
 void BusManager::parseRaw(uint8_t index, const arcade::Frame& frame) {
   if (frame.payload_length < kRawPayloadBytes) return;
   QuadrantState& node = nodes_[index];
+  node.measured_avcc_mv = arcade::getU16(frame.payload + 1);
   uint8_t offset = kRawHeaderBytes;
   for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
     node.raw[i] = arcade::getU16(frame.payload + offset); offset += 2;
@@ -284,6 +344,10 @@ void BusManager::parseRaw(uint8_t index, const arcade::Frame& frame) {
 
 void BusManager::handleTimeout(uint32_t now_ms) {
   pending_ = false; ++timeout_count_;
+  if (callbacks_.busTrace) {
+    callbacks_.busTrace("rx", pending_node_, pending_sequence_, pending_type_,
+                        "timeout", nullptr, 0);
+  }
   QuadrantState& node = nodes_[pending_node_];
   const bool was_online = node.online;
   ++node.timeouts;
@@ -343,13 +407,14 @@ void BusManager::startQueued(uint32_t now_ms) {
 }
 
 bool BusManager::queueNodeSync(uint8_t node) {
-  if (!isOnline(node) || queue_count_ > kQueueCapacity - 2) return false;
+  if (!isOnline(node) || queue_count_ > kQueueCapacity - 3) return false;
   uint8_t payload[3] = {arcade::configKey(arcade::ConfigKey::kOrientation), 0, 0};
   arcade::putU16(payload + 1, orientation_[node]);
   if (!enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload))) return false;
   payload[0] = arcade::configKey(arcade::ConfigKey::kRuntimeMode);
   arcade::putU16(payload + 1, static_cast<uint8_t>(runtime_mode_));
-  return enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload));
+  return enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload)) &&
+         enqueue(node, arcade::MessageType::kInfo, nullptr, 0);
 }
 
 void BusManager::sendBroadcast(arcade::MessageType type, const uint8_t* payload, uint8_t length) {

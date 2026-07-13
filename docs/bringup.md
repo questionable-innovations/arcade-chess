@@ -76,6 +76,9 @@ every 128-byte page over the shared bus, and confirms the new application:
 # Build firmware-atmega and flash quadrant 0 through the ESP's USB port
 tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 0 --build
 
+# Build once, then flash every quadrant in sequence over one connection
+tools/flash-quadrant.py --all --build
+
 # Flash an existing image
 tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
     --hex firmware-atmega/.pio/build/ATmega328PB/firmware.hex
@@ -83,8 +86,10 @@ tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
 
 `--port` is auto-detected when exactly one USB serial device is attached. These
 tools are also exposed as PlatformIO project tasks (sidebar: Project Tasks →
-ATmega328PB → Custom): flash/provision per quadrant plus the protocol host
-tests, e.g. `pio run -d firmware-atmega -t flash_quadrant_0`.
+ATmega328PB → Custom): flash all quadrants, flash/provision per quadrant, and the
+protocol host tests, e.g. `pio run -d firmware-atmega -e ATmega328PB -t
+flash_all_quadrants`. The ISP fuse/bootloader environments are kept out of this
+list in the separate `firmware-atmega/provisioning/` project.
 
 Close any open serial monitor first; the script owns the port. The full sequence
 per target is: `MAINTENANCE_BEGIN` broadcast (non-targets suppress responses),
@@ -94,11 +99,11 @@ at the 115200 bootloader baud, `MAINTENANCE_END`, then an `FW_HEALTH` check of t
 rebooted application and an acknowledged `FW_CONFIRM` that marks the image valid.
 Success is only reported after readback, health, and confirmation all pass.
 
-The bus runs at 38,400 baud but Urboot is built for 115200
-(`board_bootloader.speed`); the ESP switches its bus UART for the programming
-window only. If sync proves unreliable on the diode-OR return at that rate,
-rebuild and re-provision Urboot at a slower speed and change `kBootloaderBaud`
-in `firmware-esp/src/avr_flasher.cpp` to match. Quadrant LEDs freeze during the
+The bus runs at 38,400 baud but the installed Urboot build autobauds, so the
+programming rate is set solely by `kBootloaderBaud` (115200) in
+`firmware-esp/src/avr_flasher.cpp`; the ESP switches its bus UART for the
+programming window only. If sync proves unreliable on the diode-OR return at
+that rate, lower `kBootloaderBaud`. Quadrant LEDs freeze during the
 programming window because render broadcasts pause.
 
 If flashing fails, the target is left recoverable: Urboot times out back to the

@@ -27,6 +27,10 @@ export interface EventData {
 	percent?: number;
 	samples?: number;
 	ok?: boolean;
+	scan_id?: number | string;
+	complete?: boolean;
+	response_node_mask?: number;
+	raw_adc?: (number | null)[];
 }
 
 // A device event envelope, relayed verbatim by the server.
@@ -78,6 +82,7 @@ export interface DeviceState {
 	snapshot: Envelope | null;
 	node_status: (Envelope | null)[];
 	device_status: Envelope | null;
+	raw_scan: Envelope | null;
 	lastEventAt: number;
 }
 
@@ -101,6 +106,7 @@ export function emptyDevice(id: string): DeviceState {
 		snapshot: null,
 		node_status: [null, null, null, null],
 		device_status: null,
+		raw_scan: null,
 		lastEventAt: 0
 	};
 }
@@ -115,6 +121,8 @@ export function summarize(env: Envelope): string {
 			const n = d.valid ? d.valid.filter(Boolean).length : 64;
 			return `board.snapshot valid=${n}/64`;
 		}
+		case 'sensor.raw_scan':
+			return `sensor.raw_scan ${d.scan_id ?? '?'} ${d.complete ? 'complete' : 'partial'} mask=${d.response_node_mask ?? '?'}`;
 		case 'node.status':
 			return `node.status n${d.node} ${d.online ? 'online' : 'offline'} cal=${d.calibrated ? 1 : 0}`;
 		case 'device.status':

@@ -45,6 +45,9 @@ LED refresh rate.
 | `0x65` | `FW_HEALTH` | empty | `marker_state, reset_cause, uptime_ms:u32, update_id:u32, image_crc32:u32` |
 | `0x66` | `FW_CONFIRM` | `update_id:u32` | `update_id:u32, marker_state`; requires a candidate/valid marker with matching ID |
 
+Responses echo the request type, with two exceptions: `GET_RAW_SCAN` is answered
+with type `0x25` `RAW_SCAN` and `CALIBRATE` with type `0x31` `CALIBRATION_RESULT`.
+
 `GET_RAW_SCAN` is intentionally a relatively long response: 99 payload bytes.
 Noise and state use compact 8-bit fields. The ESP requests quadrants one at a time. A
 quadrant takes the requested extra samples cooperatively, then responds; it never

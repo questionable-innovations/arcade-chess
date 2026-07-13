@@ -154,7 +154,9 @@ bool AvrFlasher::parseHexLine(const char* line) {
   switch (static_cast<HexRecordType>(type)) {
     case HexRecordType::kData: {
       const uint32_t absolute = ext_base_ + address;
-      if (absolute + length > kAppLimit) { fail("record beyond application limit"); return false; }
+      if (absolute >= kAppLimit || length > kAppLimit - absolute) {
+        fail("record beyond application limit"); return false;
+      }
       memcpy(image_ + absolute, data, length);
       if (absolute + length > image_size_) image_size_ = absolute + length;
       return true;
@@ -163,9 +165,11 @@ bool AvrFlasher::parseHexLine(const char* line) {
       eof_seen_ = true;
       return true;
     case HexRecordType::kExtendedSegmentAddress:
+      if (length != 2) { fail("bad extended address record"); return false; }
       ext_base_ = (static_cast<uint32_t>(data[0]) << 8 | data[1]) << 4;
       return true;
     case HexRecordType::kExtendedLinearAddress:
+      if (length != 2) { fail("bad extended address record"); return false; }
       ext_base_ = (static_cast<uint32_t>(data[0]) << 8 | data[1]) << 16;
       return true;
     case HexRecordType::kStartSegmentAddress:
@@ -296,6 +300,13 @@ void AvrFlasher::tick(uint32_t now_ms) {
 void AvrFlasher::onFwResponse(uint8_t node, arcade::MessageType type, bool ok,
                               const uint8_t* payload, uint8_t length) {
   if (node != node_) return;
+  if (phase_ == Phase::kAwaitHandoff && !ok &&
+      (type == arcade::MessageType::kFwPrepare ||
+       type == arcade::MessageType::kFwEnterBootloader)) {
+    fail(type == arcade::MessageType::kFwPrepare ? "prepare rejected"
+                                                 : "enter rejected");
+    return;
+  }
   if (phase_ == Phase::kHealth && type == arcade::MessageType::kFwHealth) {
     if (!ok || length < kHealthPayloadBytes) { fail("health request rejected"); return; }
     const uint8_t marker_state = payload[kHealthMarkerOffset];
@@ -332,10 +343,11 @@ void AvrFlasher::finishSuccess() {
 void AvrFlasher::fail(const char* reason) {
   Serial.printf("FLASH FAIL node=%u phase=%u reason=%s\n", node_,
                 static_cast<unsigned>(phase_), reason);
-  if (bus_->programmingHandoff()) {
-    restoreBusBaud();
-    // Ends the quiet lease for the other quadrants; the target's urboot times
-    // out back to whatever application is present. Re-run fw-flash to retry.
+  if (bus_->programmingHandoff()) restoreBusBaud();
+  if (phase_ >= Phase::kAwaitHandoff) {
+    // Ends the quiet lease for the other quadrants even when bootloader entry
+    // was never acknowledged; the target's urboot times out back to whatever
+    // application is present. Re-run fw-flash to retry.
     bus_->endFirmwareMaintenance(token_);
   }
   free(image_);

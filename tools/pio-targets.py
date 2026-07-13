@@ -27,6 +27,15 @@ def add_protocol_tests() -> None:
 
 
 if env["PIOENV"] == "ATmega328PB":
+    env.AddCustomTarget(
+        name="flash_all_quadrants",
+        dependencies="$BUILD_DIR/${PROGNAME}.hex",
+        actions=[
+            f'"{TOOLS}/flash-quadrant.py" --all --hex "$BUILD_DIR/${{PROGNAME}}.hex"'
+        ],
+        title="Flash all quadrants (ESP USB)",
+        description="Build, then program every quadrant in sequence",
+    )
     for node in range(QUADRANT_COUNT):
         env.AddCustomTarget(
             name=f"flash_quadrant_{node}",

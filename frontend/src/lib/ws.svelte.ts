@@ -43,6 +43,8 @@ function applyEvent(dev: DeviceState, env: Envelope): void {
 		dev.node_status[d.node] = env;
 	} else if (env.type === 'device.status') {
 		dev.device_status = env;
+	} else if (env.type === 'sensor.raw_scan') {
+		dev.raw_scan = env;
 	}
 
 	// Seqless envelopes (e.g. command.result) carry no boot_id/seq; they update the
@@ -210,9 +212,9 @@ class WsStore {
 			if (dv.snapshot) applyEvent(dev, dv.snapshot);
 			const recent = dv.recent ?? [];
 			// Replay recent events (oldest first) so the board and seq baseline track the
-			// newest event, not a stale stored snapshot; the server does not request a
-			// fresh snapshot on browser connect, so otherwise the first live sensor.changed
-			// reads as a gap and freezes updates with no recovery path.
+			// newest event, not a stale stored snapshot. The server also requests a fresh
+			// snapshot from each device on client connect; the replay bridges the window
+			// until that snapshot arrives.
 			for (const env of recent) applyEvent(dev, env);
 			for (const env of recent.slice(-8)) ticks.push(this.#makeTick(env));
 			if (recent.length) dev.lastEventAt = Date.now();

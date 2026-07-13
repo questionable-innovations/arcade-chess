@@ -51,6 +51,8 @@ struct __attribute__((packed)) UpdateMarker {
   uint16_t crc;
 };
 
+static_assert(sizeof(Identity) == 8, "layout is mirrored in tools/make-quadrant-eeprom.py");
+static_assert(sizeof(Settings) == 72, "layout is mirrored in tools/make-quadrant-eeprom.py");
 static_assert(sizeof(UpdateMarker) <= 32, "update marker must fit one EEPROM slot");
 static_assert(kSettingsEepromAddress + sizeof(Settings) <= kUpdateMarkerAEepromAddress,
               "settings and update marker EEPROM regions overlap");

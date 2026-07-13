@@ -14,6 +14,8 @@ uint8_t reset_cause __attribute__((section(".noinit")));
 void captureResetCause() __attribute__((naked, used, section(".init3")));
 void captureResetCause() {
   reset_cause = MCUSR;
+  // Urboot clears MCUSR before dispatching here but preserves it in r2.
+  if (!reset_cause) asm volatile("mov %0, r2" : "=r"(reset_cause));
   MCUSR = 0;
   wdt_disable();
 }

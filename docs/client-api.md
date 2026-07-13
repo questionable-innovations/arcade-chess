@@ -20,7 +20,10 @@ shows is what the server actually received.
 ### `init`
 
 Sent once, immediately after the connection opens. Carries the full known state
-for every device the server has seen since it started.
+for every connected device, plus devices that disconnected within the last
+10 minutes (disconnected entries are dropped after that retention window; the
+server tracks at most 64 devices, evicting the oldest disconnected entry when
+full).
 
 ```json
 {

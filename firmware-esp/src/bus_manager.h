@@ -8,9 +8,13 @@ struct QuadrantState {
   bool calibrated = false;
   bool raw_valid = false;
   bool needs_sync = false;
+  bool fw_known = false;
+  uint8_t reset_cause = 0;
+  uint8_t fw_version[3]{};
   uint32_t last_seen_ms = 0;
   uint16_t timeouts = 0;
   uint16_t bad_frames = 0;
+  uint16_t measured_avcc_mv = 0;
   uint8_t consecutive_timeouts = 0;
   uint16_t raw[arcade::kSquaresPerQuadrant]{};
   uint16_t baseline[arcade::kSquaresPerQuadrant]{};
@@ -24,8 +28,12 @@ struct BusCallbacks {
   void (*rawScanReady)(bool complete, uint32_t scan_id) = nullptr;
   void (*commandComplete)(const char* correlation, bool ok, const char* reason) = nullptr;
   void (*nodePresenceChanged)(uint8_t node, bool online) = nullptr;
+  void (*nodeStatusChanged)(uint8_t node) = nullptr;
   void (*fwResponse)(uint8_t node, arcade::MessageType type, bool ok,
                      const uint8_t* payload, uint8_t length) = nullptr;
+  void (*busTrace)(const char* direction, uint8_t node, uint8_t sequence,
+                   arcade::MessageType type, const char* result,
+                   const uint8_t* payload, uint8_t length) = nullptr;
 };
 
 class BusManager {
@@ -48,6 +56,8 @@ class BusManager {
   bool setGlobalSquares(const uint8_t* squares, size_t count, uint8_t red,
                         uint8_t green, uint8_t blue, uint16_t duration_ms,
                         const char* correlation = nullptr);
+  bool clearGlobalSquares(const uint8_t* squares, size_t count,
+                          const char* correlation = nullptr);
   void setOrientation(uint8_t node, uint8_t orientation);
   void setRuntimeMode(arcade::RuntimeMode mode) { runtime_mode_ = mode; }
   uint8_t globalSquare(uint8_t node, uint8_t local) const;

@@ -1,5 +1,6 @@
 #include "firmware_update.h"
 
+#include <avr/pgmspace.h>
 #include <avr/wdt.h>
 
 #include "system_info.h"
@@ -37,15 +38,33 @@ constexpr uint8_t kHealthUpdateIdOffset = 6;
 constexpr uint8_t kHealthImageCrcOffset = 10;
 constexpr uint8_t kConfirmRequestBytes = sizeof(uint32_t);
 constexpr uint8_t kConfirmResponseBytes = sizeof(uint32_t) + sizeof(uint8_t);
+
+// Mirrors the ESP staging CRC (reflected 0xEDB88320) over the flashed image.
+uint32_t applicationCrc32(uint32_t length) {
+  uint32_t crc = UINT32_MAX;
+  for (uint32_t address = 0; address < length; ++address) {
+    crc ^= pgm_read_byte(static_cast<uint16_t>(address));
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc >> 1) ^ (0xEDB88320UL & (-(crc & 1)));
+    }
+  }
+  return ~crc;
+}
 }
 
 void FirmwareUpdate::begin() {
-  // A kProgramming marker surviving into a running application means the
-  // bootloader handoff completed and this image booted; it becomes the
-  // candidate awaiting an explicit FW_CONFIRM from the ESP.
+  // A kProgramming marker also survives a failed handoff that rebooted the old
+  // application, so only a flash CRC matching the staged image proves the new
+  // image booted and may become the candidate awaiting FW_CONFIRM.
   if (loadUpdateMarker(marker_) && marker_.state == UpdateState::kProgramming &&
       marker_.node_id == identity_.node_id) {
-    marker_.state = UpdateState::kCandidate;
+    if (applicationCrc32(marker_.image_size) == marker_.image_crc32) {
+      marker_.state = UpdateState::kCandidate;
+    } else {
+      marker_.state = UpdateState::kNone;
+      marker_.token = 0;
+      marker_.update_id = 0;
+    }
     saveUpdateMarker(marker_);
   }
 }
@@ -106,7 +125,9 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
       const uint32_t image_size = arcade::getU32(request.payload + kPrepareImageSizeOffset);
       if (!token || token != maintenance_token_ || !image_size ||
           image_size > arcade::kAvrApplicationLimit ||
-          sensors_.calibrating()) { error_code = 3; return true; }
+          sensors_.calibrating() || sensors_.rawCaptureBusy()) {
+        error_code = 3; return true;
+      }
       marker_.state = UpdateState::kRequested;
       marker_.node_id = identity_.node_id;
       marker_.token = token;
@@ -179,6 +200,9 @@ void FirmwareUpdate::tick(uint32_t now_ms) {
   lighting_.shutdownNow();
   Serial.flush();
   cli();
+  // Urboot enters programming mode only when EXTRF is set; the flag survives
+  // the watchdog reset, so the bootloader services this handoff.
+  MCUSR = _BV(EXTRF);
   wdt_enable(WDTO_15MS);
   while (true) {}
 }

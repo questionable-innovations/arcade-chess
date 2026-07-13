@@ -47,9 +47,11 @@ if ((!confirm)); then echo "dry run only; repeat with --yes to program"; exit 0;
 
 env_name="fuses_isp"
 if ((with_bootloader)); then env_name="fuses_bootloader"; fi
+# The fuse environments live in the separate provisioning/ project (kept out of
+# the IDE sidebar of the main firmware project).
 pio_options=(--project-option "upload_protocol=$programmer")
 if [[ -n "$port" ]]; then pio_options+=(--project-option "upload_port=$port"); fi
-"${pio[@]}" run -d "$root/firmware-atmega" -e "$env_name" \
+"${pio[@]}" run -d "$root/firmware-atmega/provisioning" -e "$env_name" \
   "${pio_options[@]}" -t "$([[ $with_bootloader == 1 ]] && echo bootloader || echo fuses)"
 
 avrdude="$HOME/.platformio/packages/tool-avrdude/avrdude"

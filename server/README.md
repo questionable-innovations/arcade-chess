@@ -51,7 +51,7 @@ docker run --rm -p 8080:8080 -e ADMIN_PASSWORD=changeme arcade-chess-server
 ## Caprover deployment
 
 - Domain: `chess-be.qinnovate.nz`.
-- Set the app's `captain-definition` relative path to `server/captain-definition`.
+- Set the app's `captain-definition` relative path to `./captain-definition` (the file at the repo root).
 - Container/app port: `8080`.
 - Enable **WebSocket support** for the app.
 - Set `ADMIN_PASSWORD` (and optionally `DEVICE_TOKEN`) in the app's env vars.

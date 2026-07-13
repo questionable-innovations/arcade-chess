@@ -12,9 +12,14 @@ use crate::state::{AppState, DeviceLookup};
 /// Bounded per-client outbound queue. A client whose socket stalls fills this and
 /// is then shed, so one slow viewer cannot grow server memory without bound.
 const CLIENT_QUEUE_CAP: usize = 256;
+/// Client messages are tiny (auth + command); the transport rejects anything
+/// bigger so an anonymous viewer cannot make the server buffer large payloads.
+const MAX_CLIENT_MSG_BYTES: usize = 4096;
 
 pub async fn client_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| handle_client(socket, state))
+    ws.max_message_size(MAX_CLIENT_MSG_BYTES)
+        .max_frame_size(MAX_CLIENT_MSG_BYTES)
+        .on_upgrade(move |socket| handle_client(socket, state))
 }
 
 async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
@@ -34,6 +39,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     // Queue init ahead of any relayed event so the client sees full state first.
     let init = json!({ "type": "init", "devices": state.snapshot_views() });
     let _ = out_tx.try_send(init.to_string());
+    state.request_snapshots();
 
     let mut is_admin = false;
     loop {
@@ -49,8 +55,11 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => break,
                 },
+                // A lagged subscription has silently missed events the client
+                // cannot recover from; shed it so it reconnects for a fresh init.
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(dropped = n, "client fan-out lagged");
+                    tracing::warn!(dropped = n, "client fan-out lagged; dropping client");
+                    break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },

@@ -40,6 +40,8 @@ class ProtocolService {
   arcade::StreamDecoder decoder_;
   uint16_t rx_good_ = 0;
   uint16_t rx_bad_ = 0;
+  uint8_t debug_flags_ = 0;
+  uint16_t debug_raw_interval_ms_ = 0;
   bool raw_response_pending_ = false;
   arcade::Frame raw_request_{};
 };

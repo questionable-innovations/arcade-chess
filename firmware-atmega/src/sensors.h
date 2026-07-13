@@ -30,6 +30,7 @@ class Sensors {
   bool calibrationSucceeded() const { return calibration_ok_; }
   bool startRawCapture(uint8_t samples);
   bool rawCaptureReady() const { return raw_capture_ready_; }
+  bool rawCaptureBusy() const { return raw_capture_active_ || raw_capture_ready_; }
   uint8_t rawCaptureSamples() const { return raw_capture_count_; }
   uint16_t rawCaptureValue(uint8_t square) const { return raw_capture_average_[square]; }
   void consumeRawCapture() { raw_capture_ready_ = false; }

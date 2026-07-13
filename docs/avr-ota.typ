@@ -10,9 +10,10 @@
 )[
   *Current implementation boundary.* Framed preflight, maintenance lease,
   two-phase token validation, alternating CRC-protected EEPROM markers,
-  ACK-and-drain, LED shutdown, watchdog reset, and ESP bus handoff are implemented.
-  The ESP page programmer, bootloader-side marker handling, readback verification,
-  health/confirm exchange, artifact validation, and remote job lifecycle remain.
+  ACK-and-drain, LED shutdown, watchdog reset, ESP bus handoff, the ESP page
+  programmer with full page readback verification, Intel HEX validation, and the
+  health/confirm exchange are implemented. Bootloader-side marker handling, the
+  signed artifact manifest, and the remote job lifecycle remain.
 ]
 
 #block(
@@ -161,9 +162,10 @@ behavior is captured in tests.
 10. Send `FW_CONFIRM` for the matching update/build, wait for its ACK, and only then
     mark the job successful. The application atomically advances the marker to valid.
 
-The validated programming baud must respect the diode-OR return rise time. Start at
-38,400 baud unless hardware measurements approve a faster bootloader rate. Normal
-quadrant polling is suspended for the entire raw session.
+The validated programming baud must respect the diode-OR return rise time. The
+implementation currently runs the programming session at 115,200 baud pending that
+rise-time measurement, with 38,400 baud as the fallback rate. Normal quadrant
+polling is suspended for the entire raw session.
 
 If power, ESP, backend, or Wi-Fi disappears after programming starts, the update
 marker keeps the target in a recoverable bootloader state. On ESP restart, it reads

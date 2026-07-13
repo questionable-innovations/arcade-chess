@@ -45,7 +45,9 @@ pub async fn board_ws(
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
     }
-    ws.on_upgrade(move |socket| handle_board(socket, state))
+    ws.max_message_size(MAX_MSG_BYTES)
+        .max_frame_size(MAX_MSG_BYTES)
+        .on_upgrade(move |socket| handle_board(socket, state))
 }
 
 async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
@@ -86,7 +88,13 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
     tracing::info!(device_id = %device_id, boot_id = %boot_id, "device connected");
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<String>();
-    let session = state.register_device(&device_id, hello, cmd_tx.clone());
+    let session = match state.register_device(&device_id, hello, cmd_tx.clone()) {
+        Some(session) => session,
+        None => {
+            tracing::warn!(device_id = %device_id, "device cap reached; refusing registration");
+            return;
+        }
+    };
     state.broadcast_msg(json!({ "type": "device.connected", "device_id": device_id }).to_string());
 
     // Writer task owns the socket sink and drains queued commands to the device.
@@ -98,6 +106,7 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    let mut warned_stale = false;
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
             Ok(m) => m,
@@ -111,7 +120,9 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
                     continue;
                 }
                 match serde_json::from_str::<Value>(text.as_str()) {
-                    Ok(event) => handle_event(&state, &device_id, event, &cmd_tx),
+                    Ok(event) => {
+                        handle_event(&state, &device_id, session, event, &cmd_tx, &mut warned_stale)
+                    }
                     Err(_) => {
                         tracing::warn!(device_id = %device_id, "dropped non-JSON device message");
                     }
@@ -145,7 +156,11 @@ async fn read_hello(state: &Arc<AppState>, receiver: &mut SplitStream<WebSocket>
                 }
                 match serde_json::from_str::<Value>(text.as_str()) {
                     Ok(v) if v.get("type").and_then(Value::as_str) == Some("hello") => {
-                        return Some(v)
+                        if v.get("v").and_then(Value::as_i64) != Some(1) {
+                            tracing::warn!("device hello has incompatible protocol version; closing");
+                            return None;
+                        }
+                        return Some(v);
                     }
                     _ => {
                         tracing::warn!("device first message was not hello; closing");
@@ -162,8 +177,10 @@ async fn read_hello(state: &Arc<AppState>, receiver: &mut SplitStream<WebSocket>
 fn handle_event(
     state: &Arc<AppState>,
     device_id: &str,
+    session: u64,
     event: Value,
     cmd_tx: &mpsc::UnboundedSender<String>,
+    warned_stale: &mut bool,
 ) {
     let etype = event
         .get("type")
@@ -176,7 +193,15 @@ fn handle_event(
     let boot_id = event.get("boot_id").and_then(Value::as_str).map(str::to_string);
     let seq = event.get("seq").and_then(Value::as_u64).map(|s| s as u32);
 
-    let need_snapshot = state.ingest_event(device_id, &etype, boot_id.as_deref(), seq, &event);
+    let Some(need_snapshot) =
+        state.ingest_event(device_id, session, &etype, boot_id.as_deref(), seq, &event)
+    else {
+        if !*warned_stale {
+            *warned_stale = true;
+            tracing::warn!(device_id = %device_id, "dropping events from superseded device session");
+        }
+        return;
+    };
     state.broadcast_msg(
         json!({ "type": "event", "device_id": device_id, "event": event }).to_string(),
     );
