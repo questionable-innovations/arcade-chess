@@ -1,0 +1,364 @@
+#include "bus_manager.h"
+
+#include <string.h>
+
+namespace {
+constexpr uint8_t kBusRxPin = 17;
+constexpr uint8_t kBusTxPin = 16;
+constexpr uint32_t kBusBaud = 38400;
+constexpr uint32_t kResponseTimeoutMs = 25;
+
+void copyCorrelation(char* output, const char* input) {
+  if (!input) { output[0] = 0; return; }
+  strncpy(output, input, 32);
+  output[32] = 0;
+}
+}
+
+void BusManager::begin(HardwareSerial& serial, BusCallbacks callbacks) {
+  serial_ = &serial;
+  callbacks_ = callbacks;
+  serial_->begin(kBusBaud, SERIAL_8N1, kBusRxPin, kBusTxPin);
+  Serial.printf("[%10lu][I][BUS] UART2 %u baud RX=%u TX=%u\n", millis(),
+                kBusBaud, kBusRxPin, kBusTxPin);
+}
+
+bool BusManager::enqueue(uint8_t node, arcade::MessageType type,
+                         const uint8_t* payload, uint8_t length,
+                         const char* correlation) {
+  const bool valid_broadcast = node == arcade::kBroadcastAddress &&
+      (type == arcade::MessageType::kMaintenanceBegin ||
+       type == arcade::MessageType::kMaintenanceEnd);
+  if ((!valid_broadcast && node > 3) || length > sizeof(queue_[0].payload) || queue_count_ == 8) return false;
+  QueuedCommand& q = queue_[queue_head_];
+  q.node = node; q.type = type; q.length = length;
+  if (length) memcpy(q.payload, payload, length);
+  copyCorrelation(q.correlation, correlation);
+  queue_head_ = static_cast<uint8_t>((queue_head_ + 1) % 8);
+  ++queue_count_;
+  return true;
+}
+
+bool BusManager::requestRawScan(uint8_t samples, const char* correlation) {
+  if (raw_active_) return false;
+  raw_active_ = true;
+  raw_samples_ = constrain(samples, 1, 32);
+  raw_next_node_ = 0;
+  raw_done_mask_ = 0;
+  ++raw_scan_id_;
+  copyCorrelation(raw_correlation_, correlation);
+  for (auto& node : nodes_) node.raw_valid = false;
+  return true;
+}
+
+bool BusManager::calibrate(uint8_t node, const char* correlation) {
+  const uint8_t action = 1;
+  return enqueue(node, arcade::MessageType::kCalibrate, &action, 1, correlation);
+}
+
+bool BusManager::identify(uint8_t node, uint16_t duration_ms, const char* correlation) {
+  uint8_t payload[2]; arcade::putU16(payload, duration_ms);
+  return enqueue(node, arcade::MessageType::kIdentify, payload, sizeof(payload), correlation);
+}
+
+bool BusManager::setBrightness(uint8_t node, uint8_t value, const char* correlation) {
+  return enqueue(node, arcade::MessageType::kSetBrightness, &value, 1, correlation);
+}
+
+bool BusManager::setConfig(uint8_t node, uint8_t key, uint16_t value,
+                           const char* correlation) {
+  uint8_t payload[3] = {key, 0, 0}; arcade::putU16(payload + 1, value);
+  return enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload), correlation);
+}
+
+bool BusManager::firmwarePreflight(uint8_t node, const char* correlation) {
+  return enqueue(node, arcade::MessageType::kFwPreflight, nullptr, 0, correlation);
+}
+
+bool BusManager::beginFirmwareHandoff(uint8_t node, uint32_t token, uint32_t update_id,
+                                      uint32_t image_size, uint32_t image_crc32,
+                                      const char* correlation) {
+  if (node > 3 || !token || !image_size || image_size > 32384UL || raw_active_ ||
+      queue_count_ > 5 || programming_handoff_) return false;
+  uint8_t begin[7];
+  begin[0] = node; arcade::putU32(begin + 1, token); arcade::putU16(begin + 5, 30000);
+  uint8_t prepare[16];
+  arcade::putU32(prepare, token); arcade::putU32(prepare + 4, update_id);
+  arcade::putU32(prepare + 8, image_size); arcade::putU32(prepare + 12, image_crc32);
+  uint8_t enter[8];
+  arcade::putU32(enter, token); arcade::putU32(enter + 4, update_id);
+  const bool queued = enqueue(arcade::kBroadcastAddress, arcade::MessageType::kMaintenanceBegin,
+                              begin, sizeof(begin)) &&
+      enqueue(node, arcade::MessageType::kFwPrepare, prepare, sizeof(prepare)) &&
+      enqueue(node, arcade::MessageType::kFwEnterBootloader, enter, sizeof(enter), correlation);
+  if (queued) maintenance_token_ = token;
+  return queued;
+}
+
+void BusManager::endFirmwareMaintenance(uint32_t token) {
+  uint8_t payload[4]; arcade::putU32(payload, token);
+  programming_handoff_ = false;
+  sendBroadcast(arcade::MessageType::kMaintenanceEnd, payload, sizeof(payload));
+  maintenance_token_ = 0;
+}
+
+bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t red,
+                                  uint8_t green, uint8_t blue, uint16_t duration_ms,
+                                  const char* correlation) {
+  uint16_t masks[4]{};
+  for (size_t i = 0; i < count; ++i) {
+    uint8_t node = 0, local = 0;
+    if (locateGlobal(squares[i], node, local)) masks[node] |= 1U << local;
+  }
+  bool any = false;
+  int8_t last_node = -1;
+  for (uint8_t node = 0; node < 4; ++node) if (masks[node]) last_node = node;
+  for (uint8_t node = 0; node < 4; ++node) {
+    if (!masks[node]) continue;
+    uint8_t payload[7];
+    arcade::putU16(payload, masks[node]);
+    payload[2] = red; payload[3] = green; payload[4] = blue;
+    arcade::putU16(payload + 5, duration_ms);
+    any |= enqueue(node, arcade::MessageType::kSetSquares, payload, sizeof(payload),
+                   node == last_node ? correlation : nullptr);
+  }
+  return any;
+}
+
+void BusManager::setOrientation(uint8_t node, uint8_t orientation) {
+  if (node < 4) orientation_[node] = orientation & 7;
+}
+
+uint8_t BusManager::globalSquare(uint8_t node, uint8_t local) const {
+  uint8_t row = local / 4;
+  uint8_t col = local % 4;
+  const uint8_t orientation = orientation_[node] & 7;
+  if (orientation & 4) col = 3 - col;
+  const uint8_t old_row = row;
+  switch (orientation & 3) {
+    case 1: row = col; col = 3 - old_row; break;
+    case 2: row = 3 - row; col = 3 - col; break;
+    case 3: row = 3 - col; col = old_row; break;
+    default: break;
+  }
+  const uint8_t base_row = (node / 2) * 4;
+  const uint8_t base_col = (node % 2) * 4;
+  return static_cast<uint8_t>((base_row + row) * 8 + base_col + col);
+}
+
+bool BusManager::locateGlobal(uint8_t global, uint8_t& node, uint8_t& local) const {
+  if (global >= 64) return false;
+  for (uint8_t candidate_node = 0; candidate_node < 4; ++candidate_node) {
+    for (uint8_t candidate_local = 0; candidate_local < 16; ++candidate_local) {
+      if (globalSquare(candidate_node, candidate_local) == global) {
+        node = candidate_node; local = candidate_local; return true;
+      }
+    }
+  }
+  return false;
+}
+
+void BusManager::tick(uint32_t now_ms) {
+  receive(now_ms);
+  if (pending_ && static_cast<int32_t>(now_ms - deadline_ms_) >= 0) handleTimeout(now_ms);
+  if (!pending_) schedule(now_ms);
+}
+
+void BusManager::receive(uint32_t now_ms) {
+  while (serial_->available()) {
+    arcade::Frame frame{};
+    const arcade::DecodeResult result = decoder_.push(serial_->read(), frame);
+    if (result == arcade::DecodeResult::kFrame) handleResponse(frame, now_ms);
+    else if (result != arcade::DecodeResult::kNone && result != arcade::DecodeResult::kEmpty) {
+      ++bad_frames_;
+      Serial.printf("[%10u][W][BUS] decoder error=%u\n", now_ms, static_cast<unsigned>(result));
+    }
+  }
+}
+
+void BusManager::send(uint8_t node, arcade::MessageType type, const uint8_t* payload,
+                      uint8_t length, const char* correlation, uint32_t now_ms) {
+  arcade::Frame frame{};
+  frame.flags = arcade::kAckRequired;
+  frame.source = arcade::kEspAddress;
+  frame.destination = node;
+  frame.type = type;
+  frame.sequence = ++sequence_;
+  frame.payload_length = length;
+  if (length) memcpy(frame.payload, payload, length);
+  uint8_t wire[arcade::kMaxEncodedFrame];
+  const size_t wire_length = arcade::encodeFrame(frame, wire, sizeof(wire));
+  if (!wire_length) return;
+  serial_->write(wire, wire_length);
+  pending_ = true; pending_node_ = node; pending_sequence_ = frame.sequence;
+  pending_type_ = type;
+  const bool slow_eeprom = type == arcade::MessageType::kFwPrepare ||
+                           type == arcade::MessageType::kFwEnterBootloader;
+  deadline_ms_ = now_ms + (type == arcade::MessageType::kGetRawScan ? 7000 :
+                           slow_eeprom ? 300 : kResponseTimeoutMs);
+  copyCorrelation(pending_correlation_, correlation);
+}
+
+void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
+  if (!pending_ || !(frame.flags & arcade::kResponse) || frame.source != pending_node_ ||
+      frame.destination != arcade::kEspAddress || frame.sequence != pending_sequence_) {
+    ++bad_frames_;
+    Serial.printf("[%10u][W][BUS] unexpected src=%u seq=%u type=0x%02x\n", now_ms,
+                  frame.source, frame.sequence, static_cast<unsigned>(frame.type));
+    return;
+  }
+  pending_ = false; ++good_frames_;
+  QuadrantState& node = nodes_[frame.source];
+  node.online = true; node.last_seen_ms = now_ms;
+  bool ok = !(frame.flags & arcade::kError);
+  const char* reason = ok ? nullptr : "node_error";
+
+  if (ok && pending_type_ == arcade::MessageType::kPollEvents && frame.payload_length >= 1) {
+    const uint8_t count = frame.payload[0] > 8 ? 8 : frame.payload[0];
+    uint8_t offset = 1;
+    for (uint8_t i = 0; i < count && offset + 8 <= frame.payload_length; ++i) {
+      const uint8_t local = frame.payload[offset++];
+      const auto state = static_cast<arcade::SensorState>(frame.payload[offset++]);
+      const uint16_t raw = arcade::getU16(frame.payload + offset); offset += 2;
+      offset += 4;
+      if (local < 16) {
+        node.state[local] = state; node.raw[local] = raw;
+        Serial.printf("[%10u][I][SENSOR] node=%u local=%u global=%u state=%u raw=%u\n",
+                      now_ms, frame.source, local, globalSquare(frame.source, local),
+                      static_cast<unsigned>(state), raw);
+        if (callbacks_.sensorChanged) callbacks_.sensorChanged(
+            globalSquare(frame.source, local), state, raw, frame.source, local);
+      }
+    }
+  } else if (ok && pending_type_ == arcade::MessageType::kGetRawScan &&
+             frame.type == arcade::MessageType::kRawScan) {
+    parseRaw(frame.source, frame);
+    raw_done_mask_ |= 1U << frame.source;
+    finishRawIfReady();
+  } else if (ok && pending_type_ == arcade::MessageType::kStatus && frame.payload_length >= 7) {
+    node.calibrated = frame.payload[5] != 0;
+  } else if (ok && pending_type_ == arcade::MessageType::kGetSnapshot && frame.payload_length >= 48) {
+    for (uint8_t i = 0; i < 16; ++i) {
+      node.state[i] = static_cast<arcade::SensorState>(frame.payload[i]);
+      node.raw[i] = arcade::getU16(frame.payload + 16 + i * 2);
+    }
+  } else if (ok && pending_type_ == arcade::MessageType::kFwPreflight && frame.payload_length >= 18) {
+    Serial.printf("[%10u][I][FW] node=%u hfuse=0x%02x boot=%u handoff_v=%u page=%u flash=%u app_limit=%u marker=%u reset=0x%02x avcc=%u\n",
+                  now_ms, frame.source, frame.payload[1], frame.payload[2], frame.payload[3],
+                  arcade::getU16(frame.payload + 4), arcade::getU32(frame.payload + 6),
+                  arcade::getU32(frame.payload + 10), frame.payload[14], frame.payload[15],
+                  arcade::getU16(frame.payload + 16));
+  } else if (ok && pending_type_ == arcade::MessageType::kFwEnterBootloader) {
+    programming_handoff_ = true;
+    Serial.printf("[%10u][I][FW] target=%u ACKed bootloader entry; framed polling stopped\n",
+                  now_ms, frame.source);
+  }
+  if (!ok && pending_type_ == arcade::MessageType::kFwPrepare) {
+    queue_count_ = 0;
+    queue_tail_ = queue_head_;
+  }
+  if (pending_correlation_[0] && callbacks_.commandComplete &&
+      pending_type_ != arcade::MessageType::kGetRawScan) {
+    callbacks_.commandComplete(pending_correlation_, ok, reason);
+  }
+}
+
+void BusManager::parseRaw(uint8_t index, const arcade::Frame& frame) {
+  if (frame.payload_length < 99) return;
+  QuadrantState& node = nodes_[index];
+  uint8_t offset = 3;
+  for (uint8_t i = 0; i < 16; ++i) {
+    node.raw[i] = arcade::getU16(frame.payload + offset); offset += 2;
+    node.baseline[i] = arcade::getU16(frame.payload + offset); offset += 2;
+    node.noise[i] = frame.payload[offset++];
+    node.state[i] = static_cast<arcade::SensorState>(frame.payload[offset++]);
+  }
+  node.raw_valid = true;
+}
+
+void BusManager::handleTimeout(uint32_t now_ms) {
+  pending_ = false; ++timeout_count_;
+  QuadrantState& node = nodes_[pending_node_];
+  node.online = false; ++node.timeouts;
+  Serial.printf("[%10u][W][BUS] timeout node=%u type=0x%02x seq=%u\n", now_ms,
+                pending_node_, static_cast<unsigned>(pending_type_), pending_sequence_);
+  if (pending_type_ == arcade::MessageType::kGetRawScan) {
+    raw_done_mask_ |= 1U << pending_node_;
+    finishRawIfReady();
+  } else if (pending_correlation_[0] && callbacks_.commandComplete) {
+    callbacks_.commandComplete(pending_correlation_, false, "timeout");
+  }
+}
+
+void BusManager::finishRawIfReady() {
+  if (raw_done_mask_ != 0x0f) return;
+  raw_active_ = false;
+  bool complete = true;
+  for (const auto& node : nodes_) complete &= node.raw_valid;
+  Serial.printf("[%10lu][I][RAW] scan=%u complete=%u\n", millis(), raw_scan_id_, complete);
+  if (callbacks_.rawScanReady) callbacks_.rawScanReady(complete, raw_scan_id_);
+  if (raw_correlation_[0] && callbacks_.commandComplete) {
+    callbacks_.commandComplete(raw_correlation_, complete, complete ? nullptr : "partial_scan");
+  }
+}
+
+void BusManager::startQueued(uint32_t now_ms) {
+  QueuedCommand q = queue_[queue_tail_];
+  queue_tail_ = static_cast<uint8_t>((queue_tail_ + 1) % 8); --queue_count_;
+  if (q.node == arcade::kBroadcastAddress) sendBroadcast(q.type, q.payload, q.length);
+  else send(q.node, q.type, q.payload, q.length, q.correlation, now_ms);
+}
+
+void BusManager::sendBroadcast(arcade::MessageType type, const uint8_t* payload, uint8_t length) {
+  arcade::Frame frame{};
+  frame.source = arcade::kEspAddress;
+  frame.destination = arcade::kBroadcastAddress;
+  frame.type = type;
+  frame.sequence = ++sequence_;
+  frame.payload_length = length;
+  if (length) memcpy(frame.payload, payload, length);
+  uint8_t wire[arcade::kMaxEncodedFrame];
+  const size_t wire_length = arcade::encodeFrame(frame, wire, sizeof(wire));
+  if (wire_length) { serial_->write(wire, wire_length); serial_->flush(); }
+}
+
+void BusManager::openRenderWindow(uint32_t now_ms) {
+  (void)now_ms;
+  arcade::Frame frame{};
+  frame.source = arcade::kEspAddress;
+  frame.destination = arcade::kBroadcastAddress;
+  frame.type = arcade::MessageType::kRenderWindow;
+  frame.sequence = ++sequence_;
+  uint8_t wire[arcade::kMaxEncodedFrame];
+  const size_t length = arcade::encodeFrame(frame, wire, sizeof(wire));
+  if (length) {
+    serial_->write(wire, length);
+    serial_->flush();
+  }
+  const uint32_t marker_sent_ms = millis();
+  bus_quiet_until_ms_ = marker_sent_ms + 4;
+  next_render_ms_ = marker_sent_ms + 40;
+}
+
+void BusManager::schedule(uint32_t now_ms) {
+  if (programming_handoff_) return;
+  if (static_cast<int32_t>(now_ms - bus_quiet_until_ms_) < 0) return;
+  if (static_cast<int32_t>(now_ms - next_render_ms_) >= 0) {
+    openRenderWindow(now_ms);
+    return;
+  }
+  if (queue_count_) { startQueued(now_ms); return; }
+  if (raw_active_ && raw_next_node_ < 4) {
+    const uint8_t sample = raw_samples_;
+    send(raw_next_node_++, arcade::MessageType::kGetRawScan, &sample, 1, nullptr, now_ms);
+    return;
+  }
+  if (static_cast<int32_t>(now_ms - next_poll_ms_) < 0) return;
+  const uint8_t max_events = 8;
+  const uint8_t count = ++poll_count_[poll_node_];
+  if (count == 1) send(poll_node_, arcade::MessageType::kStatus, nullptr, 0, nullptr, now_ms);
+  else if (count == 2) send(poll_node_, arcade::MessageType::kGetSnapshot, nullptr, 0, nullptr, now_ms);
+  else send(poll_node_, arcade::MessageType::kPollEvents, &max_events, 1, nullptr, now_ms);
+  poll_node_ = static_cast<uint8_t>((poll_node_ + 1) & 3);
+  next_poll_ms_ = now_ms + 10;
+}
