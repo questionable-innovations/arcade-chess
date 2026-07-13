@@ -71,37 +71,6 @@ bool BusManager::setConfig(uint8_t node, uint8_t key, uint16_t value,
   return enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload), correlation);
 }
 
-bool BusManager::firmwarePreflight(uint8_t node, const char* correlation) {
-  return enqueue(node, arcade::MessageType::kFwPreflight, nullptr, 0, correlation);
-}
-
-bool BusManager::beginFirmwareHandoff(uint8_t node, uint32_t token, uint32_t update_id,
-                                      uint32_t image_size, uint32_t image_crc32,
-                                      const char* correlation) {
-  if (node > 3 || !token || !image_size || image_size > 32384UL || raw_active_ ||
-      queue_count_ > 5 || programming_handoff_) return false;
-  uint8_t begin[7];
-  begin[0] = node; arcade::putU32(begin + 1, token); arcade::putU16(begin + 5, 30000);
-  uint8_t prepare[16];
-  arcade::putU32(prepare, token); arcade::putU32(prepare + 4, update_id);
-  arcade::putU32(prepare + 8, image_size); arcade::putU32(prepare + 12, image_crc32);
-  uint8_t enter[8];
-  arcade::putU32(enter, token); arcade::putU32(enter + 4, update_id);
-  const bool queued = enqueue(arcade::kBroadcastAddress, arcade::MessageType::kMaintenanceBegin,
-                              begin, sizeof(begin)) &&
-      enqueue(node, arcade::MessageType::kFwPrepare, prepare, sizeof(prepare)) &&
-      enqueue(node, arcade::MessageType::kFwEnterBootloader, enter, sizeof(enter), correlation);
-  if (queued) maintenance_token_ = token;
-  return queued;
-}
-
-void BusManager::endFirmwareMaintenance(uint32_t token) {
-  uint8_t payload[4]; arcade::putU32(payload, token);
-  programming_handoff_ = false;
-  sendBroadcast(arcade::MessageType::kMaintenanceEnd, payload, sizeof(payload));
-  maintenance_token_ = 0;
-}
-
 bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t red,
                                   uint8_t green, uint8_t blue, uint16_t duration_ms,
                                   const char* correlation) {
@@ -123,39 +92,6 @@ bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t 
                    node == last_node ? correlation : nullptr);
   }
   return any;
-}
-
-void BusManager::setOrientation(uint8_t node, uint8_t orientation) {
-  if (node < 4) orientation_[node] = orientation & 7;
-}
-
-uint8_t BusManager::globalSquare(uint8_t node, uint8_t local) const {
-  uint8_t row = local / 4;
-  uint8_t col = local % 4;
-  const uint8_t orientation = orientation_[node] & 7;
-  if (orientation & 4) col = 3 - col;
-  const uint8_t old_row = row;
-  switch (orientation & 3) {
-    case 1: row = col; col = 3 - old_row; break;
-    case 2: row = 3 - row; col = 3 - col; break;
-    case 3: row = 3 - col; col = old_row; break;
-    default: break;
-  }
-  const uint8_t base_row = (node / 2) * 4;
-  const uint8_t base_col = (node % 2) * 4;
-  return static_cast<uint8_t>((base_row + row) * 8 + base_col + col);
-}
-
-bool BusManager::locateGlobal(uint8_t global, uint8_t& node, uint8_t& local) const {
-  if (global >= 64) return false;
-  for (uint8_t candidate_node = 0; candidate_node < 4; ++candidate_node) {
-    for (uint8_t candidate_local = 0; candidate_local < 16; ++candidate_local) {
-      if (globalSquare(candidate_node, candidate_local) == global) {
-        node = candidate_node; local = candidate_local; return true;
-      }
-    }
-  }
-  return false;
 }
 
 void BusManager::tick(uint32_t now_ms) {
@@ -223,9 +159,11 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
       offset += 4;
       if (local < 16) {
         node.state[local] = state; node.raw[local] = raw;
-        Serial.printf("[%10u][I][SENSOR] node=%u local=%u global=%u state=%u raw=%u\n",
-                      now_ms, frame.source, local, globalSquare(frame.source, local),
-                      static_cast<unsigned>(state), raw);
+        if (runtime_mode_ == arcade::RuntimeMode::kBringup) {
+          Serial.printf("[%10u][I][SENSOR] node=%u local=%u global=%u state=%u raw=%u\n",
+                        now_ms, frame.source, local, globalSquare(frame.source, local),
+                        static_cast<unsigned>(state), raw);
+        }
         if (callbacks_.sensorChanged) callbacks_.sensorChanged(
             globalSquare(frame.source, local), state, raw, frame.source, local);
       }

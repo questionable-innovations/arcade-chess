@@ -1,7 +1,7 @@
 # Arcade Chess device WebSocket API v1
 
 Status: **implementation contract for bring-up**. The ESP32 device connects to
-`wss://chess.qinnovate.nz/board`. The prototype firmware disables server
+`wss://chess-be.qinnovate.nz/board`. The prototype firmware disables server
 certificate validation. A production configuration can add CA or public-key
 validation later.
 
@@ -139,6 +139,7 @@ Initial command names:
 | `sensor.raw_stream.set` | `enabled`, `interval_ms` (clamped to 250-10000), `samples_per_square` (1-8), and optional `duration_ms` (maximum 10 minutes) |
 | `diagnostics.trace` | `enabled`, optional `raw_frames`, `duration_ms` |
 | `device.restart` | `confirm`: exact `"restart"` string |
+| `device.mode.set` | `mode`: `"normal"` or `"bringup"`; persisted and propagated to quadrants |
 
 Calibration and restart commands require a physical/operator workflow in the UI.
 The ESP rejects malformed, stale, unsupported, or unsafe commands with a stable

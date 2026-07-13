@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <arcade_protocol/protocol.h>
 
 struct AppConfig {
   String wifi_ssid;
@@ -12,6 +13,7 @@ struct AppConfig {
   uint16_t websocket_port = 443;
   String websocket_path = "/board";
   uint8_t orientation[4]{};
+  arcade::RuntimeMode runtime_mode = arcade::RuntimeMode::kNormal;
 
   void load(Preferences& preferences);
   void save(Preferences& preferences) const;

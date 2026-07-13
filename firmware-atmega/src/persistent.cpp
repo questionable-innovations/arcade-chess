@@ -11,24 +11,6 @@ constexpr uint32_t kIdentityMagic = 0x51434944UL;  // QCID
 constexpr uint32_t kSettingsMagic = 0x51434346UL;  // QCCF
 constexpr uint32_t kUpdateMagic = 0x51435550UL;    // QCUP
 
-struct __attribute__((packed)) LegacySettingsV1 {
-  uint32_t magic;
-  uint8_t version;
-  uint16_t enter_threshold;
-  uint16_t exit_threshold;
-  uint8_t debounce_scans;
-  uint16_t mux_settle_us;
-  uint16_t full_scan_ms;
-  uint8_t brightness;
-  uint16_t positive_rgb565;
-  uint16_t negative_rgb565;
-  uint8_t orientation;
-  uint16_t baseline[16];
-  uint8_t noise[16];
-  uint8_t calibrated;
-  uint16_t crc;
-};
-
 bool validUpdateMarker(const UpdateMarker& marker) {
   return marker.magic == kUpdateMagic && marker.version == 1 && marker.node_id < 4 &&
          static_cast<uint8_t>(marker.state) <= static_cast<uint8_t>(UpdateState::kValid) &&
@@ -64,7 +46,7 @@ bool loadIdentity(Identity& identity) {
 void loadDefaultSettings(Settings& s) {
   memset(&s, 0, sizeof(s));
   s.magic = kSettingsMagic;
-  s.version = 2;
+  s.version = 1;
   s.enter_threshold = bringup::kDefaultEnterThreshold;
   s.exit_threshold = bringup::kDefaultExitThreshold;
   s.debounce_scans = bringup::kDefaultDebounceScans;
@@ -82,7 +64,7 @@ void loadDefaultSettings(Settings& s) {
 
 bool loadSettings(Settings& settings) {
   EEPROM.get(kSettingsEepromAddress, settings);
-  const bool valid = settings.magic == kSettingsMagic && settings.version == 2 &&
+  const bool valid = settings.magic == kSettingsMagic && settings.version == 1 &&
       settings.enter_threshold >= 10 && settings.enter_threshold <= 400 &&
       settings.exit_threshold < settings.enter_threshold &&
       settings.debounce_scans >= 1 && settings.debounce_scans <= 20 &&
@@ -90,34 +72,13 @@ bool loadSettings(Settings& settings) {
           static_cast<uint8_t>(arcade::RuntimeMode::kBringup) &&
       settings.crc == storageCrc(reinterpret_cast<const uint8_t*>(&settings),
                                  sizeof(settings) - sizeof(settings.crc));
-  if (valid) return true;
-
-  LegacySettingsV1 legacy{};
-  EEPROM.get(kSettingsEepromAddress, legacy);
-  const bool legacy_valid = legacy.magic == kSettingsMagic && legacy.version == 1 &&
-      legacy.crc == storageCrc(reinterpret_cast<const uint8_t*>(&legacy),
-                               sizeof(legacy) - sizeof(legacy.crc));
-  loadDefaultSettings(settings);
-  if (!legacy_valid) return false;
-  settings.enter_threshold = legacy.enter_threshold;
-  settings.exit_threshold = legacy.exit_threshold;
-  settings.debounce_scans = legacy.debounce_scans;
-  settings.mux_settle_us = legacy.mux_settle_us;
-  settings.full_scan_ms = legacy.full_scan_ms;
-  settings.brightness = legacy.brightness;
-  settings.positive_rgb565 = legacy.positive_rgb565;
-  settings.negative_rgb565 = legacy.negative_rgb565;
-  settings.orientation = legacy.orientation;
-  memcpy(settings.baseline, legacy.baseline, sizeof(settings.baseline));
-  memcpy(settings.noise, legacy.noise, sizeof(settings.noise));
-  settings.calibrated = legacy.calibrated;
-  saveSettings(settings);
-  return true;
+  if (!valid) loadDefaultSettings(settings);
+  return valid;
 }
 
 void saveSettings(Settings& settings) {
   settings.magic = kSettingsMagic;
-  settings.version = 2;
+  settings.version = 1;
   settings.crc = storageCrc(reinterpret_cast<const uint8_t*>(&settings),
                             sizeof(settings) - sizeof(settings.crc));
   EEPROM.put(kSettingsEepromAddress, settings);

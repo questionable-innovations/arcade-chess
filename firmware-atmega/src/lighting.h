@@ -1,7 +1,7 @@
 #pragma once
 
-#include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
+#include <FastLED.h>
 
 #include "persistent.h"
 #include "sensors.h"
@@ -20,19 +20,19 @@ class Lighting {
   void identify(uint16_t duration_ms, uint32_t now_ms);
   void setBrightness(uint8_t brightness);
   void shutdownNow();
-  uint16_t overrideMask() const { return override_mask_; }
+ uint16_t overrideMask() const { return override_mask_; }
 
  private:
-  uint32_t rgb565(uint16_t value) const;
-  void setSquare(uint8_t square, uint32_t colour);
+  CRGB rgb565(uint16_t value) const;
+  void setSquare(uint8_t square, const CRGB& colour);
   void render(uint32_t now_ms);
 
   Settings& settings_;
   Sensors& sensors_;
-  Adafruit_NeoPixel primary_;
-  Adafruit_NeoPixel secondary_;
-  Adafruit_NeoPixel edge_a_;
-  Adafruit_NeoPixel edge_b_;
+  CRGB primary_[32]{};
+  CRGB secondary_[32]{};
+  CRGB edge_a_[8]{};
+  CRGB edge_b_[8]{};
   uint16_t override_mask_ = 0;
   uint8_t override_red_ = 0;
   uint8_t override_green_ = 0;

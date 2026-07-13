@@ -61,10 +61,11 @@ layer and expire using `duration_ms`; zero means persist until cleared.
 
 Configuration keys are enter threshold `1` (ADC counts), exit threshold `2`,
 debounce scans `3`, mux settling microseconds `4`, full scan target milliseconds
-`5`, brightness `6`, positive RGB565 `7`, negative RGB565 `8`, and orientation `9`
-(`0`-`7`: four rotations with optional mirror). Invalid combinations are rejected;
+`5`, brightness `6`, positive RGB565 `7`, negative RGB565 `8`, orientation `9`
+(`0`-`7`: four rotations with optional mirror), and runtime mode `10` (`0`
+normal, `1` bring-up). Invalid combinations are rejected;
 notably exit must be lower than enter. Defaults are centralized in
-`firmware-atmega/include/bringup_config.h` and can be restored by programming a
+`firmware-atmega/src/bringup_config.h` and can be restored by programming a
 fresh EEPROM image.
 
 ## Calibration

@@ -44,6 +44,7 @@ class BusManager {
                         uint8_t green, uint8_t blue, uint16_t duration_ms,
                         const char* correlation = nullptr);
   void setOrientation(uint8_t node, uint8_t orientation);
+  void setRuntimeMode(arcade::RuntimeMode mode) { runtime_mode_ = mode; }
   uint8_t globalSquare(uint8_t node, uint8_t local) const;
   bool locateGlobal(uint8_t global, uint8_t& node, uint8_t& local) const;
   const QuadrantState& node(uint8_t index) const { return nodes_[index]; }
@@ -105,4 +106,5 @@ class BusManager {
   char raw_correlation_[33]{};
   bool programming_handoff_ = false;
   uint32_t maintenance_token_ = 0;
+  arcade::RuntimeMode runtime_mode_ = arcade::RuntimeMode::kNormal;
 };

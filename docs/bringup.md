@@ -30,7 +30,11 @@ token OPTIONAL_BEARER_TOKEN
 reboot
 ```
 
-The ESP connects to `wss://chess.qinnovate.nz/board`. Certificate validation is
+The shipped firmware defaults to `mode normal`. Use `mode bringup` for verbose
+transition/WebSocket tracing, and return with `mode normal`; raw scans, calibration,
+configuration and recovery commands are available in both modes.
+
+The ESP connects to `wss://chess-be.qinnovate.nz/board`. Certificate validation is
 disabled in the prototype. Secrets live in ESP Preferences/NVS, not the repository.
 
 ## Provision a quadrant over ISP

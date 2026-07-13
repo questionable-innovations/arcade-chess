@@ -15,6 +15,7 @@ class NetworkManager {
   void publishRawScan(bool complete, uint32_t scan_id);
   void commandComplete(const char* id, bool ok, const char* reason);
   void publishSnapshot();
+  void setRuntimeMode(arcade::RuntimeMode mode) { runtime_mode_ = mode; }
   bool connected() const { return connected_; }
   uint32_t reconnects() const { return reconnects_; }
 
@@ -43,4 +44,5 @@ class NetworkManager {
   uint32_t next_raw_stream_ms_ = 0;
   uint8_t raw_stream_samples_ = 1;
   String extra_headers_;
+  arcade::RuntimeMode runtime_mode_ = arcade::RuntimeMode::kNormal;
 };
