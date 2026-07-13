@@ -76,9 +76,9 @@ Initial event types and their `data` payloads:
 
 | `type` | `data` |
 | --- | --- |
-| `board.snapshot` | `squares`: 64 values (`-1` negative polarity, `0` empty/uncertain, `1` positive polarity), `valid`: 64 booleans, `nodes`: four node summaries |
+| `board.snapshot` | `squares`: 64 values (`-1` negative polarity, `0` empty/uncertain, `1` positive polarity), `valid`: 64 booleans, `online_node_mask`, `online_node_count`, and four node-slot summaries |
 | `sensor.changed` | `square` 0-63, `state`: `empty`, `positive`, `negative`, or `uncertain`, `raw`, `baseline`, `node`, `local_square` |
-| `sensor.raw_scan` | `scan_id`, `complete`, `captured_ms`, and 64-entry arrays: `raw_adc`, `baseline_adc`, `noise_adc`, `state`; missing/offline squares are `null` |
+| `sensor.raw_scan` | `scan_id`, `complete`, `captured_ms`, `target_node_mask`, `response_node_mask`, `online_node_mask`, and 64-entry arrays: `raw_adc`, `baseline_adc`, `noise_adc`, `state`; missing/offline squares are `null` |
 | `node.status` | `node`, `online`, `firmware`, `calibrated`, `reset_cause`, error counters |
 | `diagnostic.log` | `level`, `component`, `message`; rate limited and never contains credentials |
 | `diagnostic.bus` | `direction`, `node`, `uart_seq`, `message_type`, `result`; optional `raw_hex` when trace mode is enabled |
@@ -146,11 +146,21 @@ The ESP rejects malformed, stale, unsupported, or unsafe commands with a stable
 reason such as `invalid_args`, `unsupported`, `busy`, `node_offline`, or
 `confirmation_required`.
 
-Raw scans are diagnostic observations, not stable transition events. The ESP polls
-the four quadrants sequentially, assigns one `scan_id`, and emits the aggregate only
-after all responses arrive or their deadlines expire. `complete` is false when any
-node is missing. Continuous raw streaming is deliberately bounded and lower
-priority than event polling; the ESP may lengthen the requested interval and reports
+Quadrants are optional runtime participants. The ESP continuously discovers node
+addresses 0-3, polls online nodes normally, and probes empty sockets with bounded
+backoff. One, two, three, or four installed quadrants are all healthy board
+configurations. Commands naming a particular offline node are rejected; commands
+using `"all"` fan out only to nodes online when the command is accepted. A node
+that reconnects is rediscovered and receives the persisted orientation and runtime
+mode before normal polling resumes.
+
+Raw scans are diagnostic observations, not stable transition events. The ESP
+targets the quadrants online when the scan starts, assigns one `scan_id`, and emits
+the aggregate after those nodes respond or time out. `complete` means every node
+in `target_node_mask` responded; it does not require all four sockets to be
+populated. `response_node_mask` identifies the contributors, while all squares in
+unpopulated quadrants remain `null`. Continuous raw streaming is deliberately
+bounded and lower priority than event polling; the ESP may lengthen the requested interval and reports
 the effective settings in the command result. The frontend should plot ADC counts
 (0-1023) and may derive volts as `adc * measured_avcc_mv / 1023`; it must retain the
 raw counts because AVCC and analog gain vary during bring-up.
@@ -170,7 +180,8 @@ does not imply exactly-once event delivery.
 2. Store the latest `board.snapshot` keyed by device.
 3. Apply `sensor.changed` only when `(boot_id, seq)` advances without a gap;
    request `board.snapshot.get` after a gap.
-4. Display all four node health summaries and calibration state.
+4. Display all four node slots and their health, but treat any population from one
+   through four online quadrants as operational.
 5. Track command state asynchronously by `id`; do not optimistically claim
    hardware application.
 6. Provide an explicit raw diagnostics view, but build normal UI state from

@@ -108,7 +108,9 @@ config 0 2 42
 brightness 0 48
 ```
 
-`raw 16` averages 16 complete scans on every quadrant and prints all 64 ADC counts.
+`raw 16` averages 16 complete scans on each currently online quadrant. The output
+still has 64 board positions; squares belonging to empty sockets are reported as
+missing/null rather than making the scan fail.
 The equivalent WebSocket commands are `sensor.raw_scan.get` and bounded
 `sensor.raw_stream.set`; the frontend receives raw, baseline, noise, state, and
 missing-node information for every square.
@@ -128,6 +130,11 @@ missing-node information for every square.
    retaining frontend raw-scan captures.
 6. Use `identify` and walking-magnet tests to determine physical orientation.
    Persist orientation key 9 and then freeze the ESP global coordinate map.
+
+The ESP discovers each quadrant independently. Empty addresses are probed with
+backoff, so a board with one, two, three, or four quadrants remains responsive.
+Hot-connected nodes are automatically returned to normal polling and receive the
+current orientation and runtime mode. `calibrate all` applies only to online nodes.
 
 The green/blue settled-piece layer is local and continues without network or ESP.
 Explicit lighting commands temporarily override it.

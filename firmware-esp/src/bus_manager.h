@@ -7,9 +7,11 @@ struct QuadrantState {
   bool online = false;
   bool calibrated = false;
   bool raw_valid = false;
+  bool needs_sync = false;
   uint32_t last_seen_ms = 0;
   uint16_t timeouts = 0;
   uint16_t bad_frames = 0;
+  uint8_t consecutive_timeouts = 0;
   uint16_t raw[16]{};
   uint16_t baseline[16]{};
   uint8_t noise[16]{};
@@ -21,6 +23,7 @@ struct BusCallbacks {
                         uint16_t raw, uint8_t node, uint8_t local_square) = nullptr;
   void (*rawScanReady)(bool complete, uint32_t scan_id) = nullptr;
   void (*commandComplete)(const char* correlation, bool ok, const char* reason) = nullptr;
+  void (*nodePresenceChanged)(uint8_t node, bool online) = nullptr;
 };
 
 class BusManager {
@@ -48,6 +51,11 @@ class BusManager {
   uint8_t globalSquare(uint8_t node, uint8_t local) const;
   bool locateGlobal(uint8_t global, uint8_t& node, uint8_t& local) const;
   const QuadrantState& node(uint8_t index) const { return nodes_[index]; }
+  bool isOnline(uint8_t node) const { return node < 4 && nodes_[node].online; }
+  uint8_t onlineMask() const;
+  uint8_t onlineCount() const;
+  uint8_t rawTargetMask() const { return raw_target_mask_; }
+  uint8_t rawResponseMask() const { return raw_response_mask_; }
   uint32_t goodFrames() const { return good_frames_; }
   uint32_t badFrames() const { return bad_frames_; }
   uint32_t timeoutCount() const { return timeout_count_; }
@@ -69,6 +77,7 @@ class BusManager {
   void handleTimeout(uint32_t now_ms);
   void schedule(uint32_t now_ms);
   void startQueued(uint32_t now_ms);
+  bool queueNodeSync(uint8_t node);
   void parseRaw(uint8_t node, const arcade::Frame& frame);
   void finishRawIfReady();
   void openRenderWindow(uint32_t now_ms);
@@ -92,7 +101,7 @@ class BusManager {
   uint8_t sequence_ = 0;
   uint8_t poll_node_ = 0;
   uint8_t poll_count_[4]{};
-  uint32_t next_poll_ms_ = 0;
+  uint32_t next_poll_ms_[4]{};
   uint32_t next_render_ms_ = 0;
   uint32_t bus_quiet_until_ms_ = 0;
   uint32_t good_frames_ = 0;
@@ -101,7 +110,9 @@ class BusManager {
   bool raw_active_ = false;
   uint8_t raw_samples_ = 1;
   uint8_t raw_next_node_ = 0;
+  uint8_t raw_target_mask_ = 0;
   uint8_t raw_done_mask_ = 0;
+  uint8_t raw_response_mask_ = 0;
   uint32_t raw_scan_id_ = 0;
   char raw_correlation_[33]{};
   bool programming_handoff_ = false;

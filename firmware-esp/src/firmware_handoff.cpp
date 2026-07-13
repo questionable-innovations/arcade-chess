@@ -1,13 +1,14 @@
 #include "bus_manager.h"
 
 bool BusManager::firmwarePreflight(uint8_t node, const char* correlation) {
+  if (!isOnline(node)) return false;
   return enqueue(node, arcade::MessageType::kFwPreflight, nullptr, 0, correlation);
 }
 
 bool BusManager::beginFirmwareHandoff(uint8_t node, uint32_t token, uint32_t update_id,
                                       uint32_t image_size, uint32_t image_crc32,
                                       const char* correlation) {
-  if (node > 3 || !token || !image_size || image_size > 32384UL || raw_active_ ||
+  if (!isOnline(node) || !token || !image_size || image_size > 32384UL || raw_active_ ||
       queue_count_ > 5 || programming_handoff_) return false;
   uint8_t begin[7];
   begin[0] = node;

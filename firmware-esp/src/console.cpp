@@ -39,11 +39,12 @@ void Console::setMode(const char* value) {
   config_->save(*preferences_);
   bus_->setRuntimeMode(mode);
   network_->setRuntimeMode(mode);
-  for (uint8_t node = 0; node < 4; ++node) {
+  for (uint8_t node = 0; node < 4; ++node) if (bus_->isOnline(node)) {
     bus_->setConfig(node, 10, static_cast<uint8_t>(mode));
   }
-  Serial.printf("mode=%s saved; quadrant updates queued\n",
-                mode == arcade::RuntimeMode::kBringup ? "bringup" : "normal");
+  Serial.printf("mode=%s saved; %u online quadrant update(s) queued\n",
+                mode == arcade::RuntimeMode::kBringup ? "bringup" : "normal",
+                bus_->onlineCount());
 }
 
 void Console::execute(char* line) {
@@ -59,19 +60,24 @@ void Console::execute(char* line) {
   } else if (!strcmp(command, "nodes")) {
     for (uint8_t i = 0; i < 4; ++i) {
       const QuadrantState& q = bus_->node(i);
-      Serial.printf("node=%u online=%u calibrated=%u last_seen=%u timeouts=%u raw_valid=%u\n",
-                    i, q.online, q.calibrated, q.last_seen_ms, q.timeouts, q.raw_valid);
+      Serial.printf("node=%u online=%u calibrated=%u last_seen=%u timeouts=%u consecutive=%u sync=%u raw_valid=%u\n",
+                    i, q.online, q.calibrated, q.last_seen_ms, q.timeouts,
+                    q.consecutive_timeouts, q.needs_sync, q.raw_valid);
     }
   } else if (!strcmp(command, "mode")) setMode(strtok_r(nullptr, " ", &save));
   else if (!strcmp(command, "raw")) {
     const char* value = strtok_r(nullptr, " ", &save);
-    Serial.printf("raw request: %s\n",
-                  bus_->requestRawScan(value ? atoi(value) : 1) ? "queued" : "busy");
+    Serial.printf("raw request: %s\n", bus_->requestRawScan(value ? atoi(value) : 1)
+                  ? "queued" : "rejected (busy or no online quadrants)");
   } else if (!strcmp(command, "calibrate")) {
     const char* value = strtok_r(nullptr, " ", &save);
-    if (value && !strcmp(value, "all"))
-      for (uint8_t i = 0; i < 4; ++i) bus_->calibrate(i);
-    else if (value) bus_->calibrate(atoi(value));
+    if (value && !strcmp(value, "all")) {
+      for (uint8_t i = 0; i < 4; ++i) {
+        if (bus_->isOnline(i)) bus_->calibrate(i);
+      }
+    } else if (value) {
+      bus_->calibrate(atoi(value));
+    }
   } else if (!strcmp(command, "identify")) {
     const char* node = strtok_r(nullptr, " ", &save);
     const char* duration = strtok_r(nullptr, " ", &save);

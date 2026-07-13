@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <FastLED.h>
 
+#include "fastled_atmega328pb.h"
 #include "persistent.h"
 #include "sensors.h"
 
@@ -20,7 +21,7 @@ class Lighting {
   void identify(uint16_t duration_ms, uint32_t now_ms);
   void setBrightness(uint8_t brightness);
   void shutdownNow();
- uint16_t overrideMask() const { return override_mask_; }
+  uint16_t overrideMask() const { return override_mask_; }
 
  private:
   CRGB rgb565(uint16_t value) const;

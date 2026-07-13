@@ -53,6 +53,8 @@ void NetworkManager::tick(uint32_t now_ms) {
     doc["data"]["uart_good"] = bus_->goodFrames();
     doc["data"]["uart_bad"] = bus_->badFrames();
     doc["data"]["uart_timeouts"] = bus_->timeoutCount();
+    doc["data"]["quadrant_mask"] = bus_->onlineMask();
+    doc["data"]["quadrant_count"] = bus_->onlineCount();
     doc["data"]["mode"] = runtime_mode_ == arcade::RuntimeMode::kBringup
         ? "bringup" : "normal";
     String json; serializeJson(doc, json); sendJson(json);
@@ -129,6 +131,9 @@ void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
   doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
   doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
   data["scan_id"] = scan_id; data["complete"] = complete; data["captured_ms"] = millis();
+  data["target_node_mask"] = bus_->rawTargetMask();
+  data["response_node_mask"] = bus_->rawResponseMask();
+  data["online_node_mask"] = bus_->onlineMask();
   JsonArray raw = data["raw_adc"].to<JsonArray>();
   JsonArray baseline = data["baseline_adc"].to<JsonArray>();
   JsonArray noise = data["noise_adc"].to<JsonArray>();
@@ -156,6 +161,8 @@ void NetworkManager::publishSnapshot() {
   JsonArray squares = data["squares"].to<JsonArray>();
   JsonArray valid = data["valid"].to<JsonArray>();
   JsonArray nodes = data["nodes"].to<JsonArray>();
+  data["online_node_mask"] = bus_->onlineMask();
+  data["online_node_count"] = bus_->onlineCount();
   for (uint8_t node = 0; node < 4; ++node) {
     const QuadrantState& q = bus_->node(node);
     JsonObject summary = nodes.add<JsonObject>();

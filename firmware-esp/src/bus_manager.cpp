@@ -7,6 +7,10 @@ constexpr uint8_t kBusRxPin = 17;
 constexpr uint8_t kBusTxPin = 16;
 constexpr uint32_t kBusBaud = 38400;
 constexpr uint32_t kResponseTimeoutMs = 25;
+constexpr uint32_t kOnlinePollIntervalMs = 10;
+constexpr uint32_t kOfflineProbeBaseMs = 1000;
+constexpr uint32_t kOfflineProbeMaximumMs = 10000;
+constexpr uint8_t kOfflineTimeoutThreshold = 3;
 
 void copyCorrelation(char* output, const char* input) {
   if (!input) { output[0] = 0; return; }
@@ -40,11 +44,13 @@ bool BusManager::enqueue(uint8_t node, arcade::MessageType type,
 }
 
 bool BusManager::requestRawScan(uint8_t samples, const char* correlation) {
-  if (raw_active_) return false;
+  if (raw_active_ || !onlineMask()) return false;
   raw_active_ = true;
   raw_samples_ = constrain(samples, 1, 32);
   raw_next_node_ = 0;
   raw_done_mask_ = 0;
+  raw_response_mask_ = 0;
+  raw_target_mask_ = onlineMask();
   ++raw_scan_id_;
   copyCorrelation(raw_correlation_, correlation);
   for (auto& node : nodes_) node.raw_valid = false;
@@ -52,21 +58,25 @@ bool BusManager::requestRawScan(uint8_t samples, const char* correlation) {
 }
 
 bool BusManager::calibrate(uint8_t node, const char* correlation) {
+  if (!isOnline(node)) return false;
   const uint8_t action = 1;
   return enqueue(node, arcade::MessageType::kCalibrate, &action, 1, correlation);
 }
 
 bool BusManager::identify(uint8_t node, uint16_t duration_ms, const char* correlation) {
+  if (!isOnline(node)) return false;
   uint8_t payload[2]; arcade::putU16(payload, duration_ms);
   return enqueue(node, arcade::MessageType::kIdentify, payload, sizeof(payload), correlation);
 }
 
 bool BusManager::setBrightness(uint8_t node, uint8_t value, const char* correlation) {
+  if (!isOnline(node)) return false;
   return enqueue(node, arcade::MessageType::kSetBrightness, &value, 1, correlation);
 }
 
 bool BusManager::setConfig(uint8_t node, uint8_t key, uint16_t value,
                            const char* correlation) {
+  if (!isOnline(node)) return false;
   uint8_t payload[3] = {key, 0, 0}; arcade::putU16(payload + 1, value);
   return enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload), correlation);
 }
@@ -81,9 +91,11 @@ bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t 
   }
   bool any = false;
   int8_t last_node = -1;
-  for (uint8_t node = 0; node < 4; ++node) if (masks[node]) last_node = node;
   for (uint8_t node = 0; node < 4; ++node) {
-    if (!masks[node]) continue;
+    if (masks[node] && nodes_[node].online) last_node = node;
+  }
+  for (uint8_t node = 0; node < 4; ++node) {
+    if (!masks[node] || !nodes_[node].online) continue;
     uint8_t payload[7];
     arcade::putU16(payload, masks[node]);
     payload[2] = red; payload[3] = green; payload[4] = blue;
@@ -145,7 +157,17 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
   }
   pending_ = false; ++good_frames_;
   QuadrantState& node = nodes_[frame.source];
-  node.online = true; node.last_seen_ms = now_ms;
+  const bool newly_online = !node.online;
+  node.online = true;
+  node.last_seen_ms = now_ms;
+  node.consecutive_timeouts = 0;
+  next_poll_ms_[frame.source] = now_ms + kOnlinePollIntervalMs;
+  if (newly_online) {
+    poll_count_[frame.source] = 0;
+    Serial.printf("[%10u][I][BUS] node=%u online\n", now_ms, frame.source);
+    node.needs_sync = !queueNodeSync(frame.source);
+    if (callbacks_.nodePresenceChanged) callbacks_.nodePresenceChanged(frame.source, true);
+  }
   bool ok = !(frame.flags & arcade::kError);
   const char* reason = ok ? nullptr : "node_error";
 
@@ -172,6 +194,7 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
              frame.type == arcade::MessageType::kRawScan) {
     parseRaw(frame.source, frame);
     raw_done_mask_ |= 1U << frame.source;
+    raw_response_mask_ |= 1U << frame.source;
     finishRawIfReady();
   } else if (ok && pending_type_ == arcade::MessageType::kStatus && frame.payload_length >= 7) {
     node.calibrated = frame.payload[5] != 0;
@@ -217,9 +240,31 @@ void BusManager::parseRaw(uint8_t index, const arcade::Frame& frame) {
 void BusManager::handleTimeout(uint32_t now_ms) {
   pending_ = false; ++timeout_count_;
   QuadrantState& node = nodes_[pending_node_];
-  node.online = false; ++node.timeouts;
-  Serial.printf("[%10u][W][BUS] timeout node=%u type=0x%02x seq=%u\n", now_ms,
-                pending_node_, static_cast<unsigned>(pending_type_), pending_sequence_);
+  const bool was_online = node.online;
+  ++node.timeouts;
+  if (node.consecutive_timeouts < 255) ++node.consecutive_timeouts;
+  const bool confirmed_offline = !was_online ||
+      node.consecutive_timeouts >= kOfflineTimeoutThreshold;
+  node.online = !confirmed_offline;
+  uint8_t offline_misses = 0;
+  if (confirmed_offline) {
+    offline_misses = was_online
+        ? node.consecutive_timeouts - kOfflineTimeoutThreshold
+        : node.consecutive_timeouts - 1;
+  }
+  const uint8_t shift = offline_misses > 3 ? 3 : offline_misses;
+  const uint32_t retry_ms = confirmed_offline
+      ? min(kOfflineProbeBaseMs << shift, kOfflineProbeMaximumMs) : 50;
+  next_poll_ms_[pending_node_] = now_ms + retry_ms;
+  poll_count_[pending_node_] = 0;
+  if ((was_online && confirmed_offline) || runtime_mode_ == arcade::RuntimeMode::kBringup) {
+    Serial.printf("[%10u][W][BUS] node=%u %s timeout type=0x%02x retry_ms=%u\n",
+                  now_ms, pending_node_, confirmed_offline ? "offline" : "miss",
+                  static_cast<unsigned>(pending_type_), retry_ms);
+  }
+  if (was_online && confirmed_offline && callbacks_.nodePresenceChanged) {
+    callbacks_.nodePresenceChanged(pending_node_, false);
+  }
   if (pending_type_ == arcade::MessageType::kGetRawScan) {
     raw_done_mask_ |= 1U << pending_node_;
     finishRawIfReady();
@@ -229,11 +274,15 @@ void BusManager::handleTimeout(uint32_t now_ms) {
 }
 
 void BusManager::finishRawIfReady() {
-  if (raw_done_mask_ != 0x0f) return;
+  if ((raw_done_mask_ & raw_target_mask_) != raw_target_mask_) return;
   raw_active_ = false;
-  bool complete = true;
-  for (const auto& node : nodes_) complete &= node.raw_valid;
-  Serial.printf("[%10lu][I][RAW] scan=%u complete=%u\n", millis(), raw_scan_id_, complete);
+  uint8_t valid_mask = 0;
+  for (uint8_t node = 0; node < 4; ++node) {
+    if (nodes_[node].raw_valid) valid_mask |= 1U << node;
+  }
+  const bool complete = (valid_mask & raw_target_mask_) == raw_target_mask_;
+  Serial.printf("[%10lu][I][RAW] scan=%u target=0x%02x response=0x%02x complete=%u\n",
+                millis(), raw_scan_id_, raw_target_mask_, rawResponseMask(), complete);
   if (callbacks_.rawScanReady) callbacks_.rawScanReady(complete, raw_scan_id_);
   if (raw_correlation_[0] && callbacks_.commandComplete) {
     callbacks_.commandComplete(raw_correlation_, complete, complete ? nullptr : "partial_scan");
@@ -245,6 +294,16 @@ void BusManager::startQueued(uint32_t now_ms) {
   queue_tail_ = static_cast<uint8_t>((queue_tail_ + 1) % 8); --queue_count_;
   if (q.node == arcade::kBroadcastAddress) sendBroadcast(q.type, q.payload, q.length);
   else send(q.node, q.type, q.payload, q.length, q.correlation, now_ms);
+}
+
+bool BusManager::queueNodeSync(uint8_t node) {
+  if (!isOnline(node) || queue_count_ > 6) return false;
+  uint8_t payload[3] = {9, 0, 0};
+  arcade::putU16(payload + 1, orientation_[node]);
+  if (!enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload))) return false;
+  payload[0] = 10;
+  arcade::putU16(payload + 1, static_cast<uint8_t>(runtime_mode_));
+  return enqueue(node, arcade::MessageType::kConfigSet, payload, sizeof(payload));
 }
 
 void BusManager::sendBroadcast(arcade::MessageType type, const uint8_t* payload, uint8_t length) {
@@ -286,17 +345,37 @@ void BusManager::schedule(uint32_t now_ms) {
     return;
   }
   if (queue_count_) { startQueued(now_ms); return; }
-  if (raw_active_ && raw_next_node_ < 4) {
-    const uint8_t sample = raw_samples_;
-    send(raw_next_node_++, arcade::MessageType::kGetRawScan, &sample, 1, nullptr, now_ms);
+  for (uint8_t node = 0; node < 4; ++node) {
+    if (nodes_[node].needs_sync && queueNodeSync(node)) {
+      nodes_[node].needs_sync = false;
+      return;
+    }
+  }
+  if (raw_active_) {
+    for (uint8_t attempt = 0; attempt < 4; ++attempt) {
+      const uint8_t node = raw_next_node_++ & 3;
+      const uint8_t bit = 1U << node;
+      if ((raw_target_mask_ & bit) && !(raw_done_mask_ & bit)) {
+        const uint8_t sample = raw_samples_;
+        send(node, arcade::MessageType::kGetRawScan, &sample, 1, nullptr, now_ms);
+        return;
+      }
+    }
+    finishRawIfReady();
     return;
   }
-  if (static_cast<int32_t>(now_ms - next_poll_ms_) < 0) return;
-  const uint8_t max_events = 8;
-  const uint8_t count = ++poll_count_[poll_node_];
-  if (count == 1) send(poll_node_, arcade::MessageType::kStatus, nullptr, 0, nullptr, now_ms);
-  else if (count == 2) send(poll_node_, arcade::MessageType::kGetSnapshot, nullptr, 0, nullptr, now_ms);
-  else send(poll_node_, arcade::MessageType::kPollEvents, &max_events, 1, nullptr, now_ms);
-  poll_node_ = static_cast<uint8_t>((poll_node_ + 1) & 3);
-  next_poll_ms_ = now_ms + 10;
+  for (uint8_t attempt = 0; attempt < 4; ++attempt) {
+    const uint8_t node = poll_node_++ & 3;
+    if (static_cast<int32_t>(now_ms - next_poll_ms_[node]) < 0) continue;
+    if (!nodes_[node].online) {
+      send(node, arcade::MessageType::kPing, nullptr, 0, nullptr, now_ms);
+      return;
+    }
+    const uint8_t max_events = 8;
+    const uint8_t count = ++poll_count_[node];
+    if (count == 1) send(node, arcade::MessageType::kStatus, nullptr, 0, nullptr, now_ms);
+    else if (count == 2) send(node, arcade::MessageType::kGetSnapshot, nullptr, 0, nullptr, now_ms);
+    else send(node, arcade::MessageType::kPollEvents, &max_events, 1, nullptr, now_ms);
+    return;
+  }
 }

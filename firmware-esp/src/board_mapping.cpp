@@ -1,5 +1,18 @@
 #include "bus_manager.h"
 
+uint8_t BusManager::onlineMask() const {
+  uint8_t mask = 0;
+  for (uint8_t node = 0; node < 4; ++node) if (nodes_[node].online) mask |= 1U << node;
+  return mask;
+}
+
+uint8_t BusManager::onlineCount() const {
+  uint8_t count = 0;
+  uint8_t mask = onlineMask();
+  while (mask) { count += mask & 1U; mask >>= 1; }
+  return count;
+}
+
 void BusManager::setOrientation(uint8_t node, uint8_t orientation) {
   if (node < 4) orientation_[node] = orientation & 7;
 }

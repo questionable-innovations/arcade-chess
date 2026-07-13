@@ -56,6 +56,11 @@ The ESP `src/main.cpp` likewise wires and schedules the permanent subsystems:
 | `NetworkManager` | Wi-Fi and device WebSocket session, semantic events and remote commands |
 | `Console` | Human operator commands and persisted configuration changes |
 
+Quadrant population is dynamic. Each fixed address is discovered independently;
+online nodes receive normal polling, offline sockets use bounded probe backoff, and
+reappearing nodes are resynchronized. Aggregate operations target the online mask,
+so no control path treats four responses as a prerequisite for normal operation.
+
 Normal product behavior should be added at a meaningful subsystem boundary and
 scheduled from `main.cpp`, not hidden behind the bring-up mode.
 Diagnostics should observe or command stable subsystem interfaces so the same

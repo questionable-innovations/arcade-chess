@@ -39,6 +39,7 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
   if (!strcmp(name, "board.snapshot.get")) {
     publishSnapshot(); accepted = true;
   } else if (!strcmp(name, "sensor.raw_scan.get")) {
+    if (!bus_->onlineMask()) { sendResult(id, "rejected", "no_nodes_online"); return; }
     accepted = bus_->requestRawScan(args["samples_per_square"] | 1, id);
   } else if (!strcmp(name, "sensor.raw_stream.set")) {
     raw_stream_enabled_ = args["enabled"] | false;
@@ -63,17 +64,29 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     config_->save(preferences);
     bus_->setRuntimeMode(mode);
     accepted = true;
-    for (uint8_t node = 0; node < 4; ++node)
+    const uint8_t online = bus_->onlineMask();
+    int8_t last = -1;
+    for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node)) last = node;
+    for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node))
       accepted &= bus_->setConfig(node, 10, static_cast<uint8_t>(mode),
-                                  node == 3 ? id : nullptr);
+                                  node == last ? id : nullptr);
   } else if (!strcmp(name, "calibration.start")) {
     if (args["node"].is<const char*>() && !strcmp(args["node"], "all")) {
-      accepted = true;
-      for (uint8_t node = 0; node < 4; ++node)
-        accepted &= bus_->calibrate(node, node == 3 ? id : nullptr);
-    } else accepted = bus_->calibrate(args["node"] | 0xff, id);
+      const uint8_t online = bus_->onlineMask();
+      int8_t last = -1;
+      for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node)) last = node;
+      accepted = online != 0;
+      for (uint8_t node = 0; node < 4; ++node) if (online & (1U << node))
+        accepted &= bus_->calibrate(node, node == last ? id : nullptr);
+    } else {
+      const uint8_t node = args["node"] | 0xff;
+      if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
+      accepted = bus_->calibrate(node, id);
+    }
   } else if (!strcmp(name, "node.identify")) {
-    accepted = bus_->identify(args["node"] | 0xff, args["duration_ms"] | 3000, id);
+    const uint8_t node = args["node"] | 0xff;
+    if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
+    accepted = bus_->identify(node, args["duration_ms"] | 3000, id);
   } else if (!strcmp(name, "lighting.set")) {
     uint8_t squares[64]; size_t count = 0;
     for (JsonVariant square : args["squares"].as<JsonArray>())
