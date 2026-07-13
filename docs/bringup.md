@@ -55,35 +55,57 @@ the CRC-protected identity and configuration defaults, sets external-crystal/BOD
 EEPROM-preserve fuses, writes the application, and verifies flash plus EEPROM. It
 accepts `--port` and `--bitclock` for programmers that need them.
 
-MiniCore Urboot is installed by default before the application so addressed OTA
-entry remains available. `--no-bootloader` is a recovery/manufacturing escape
-hatch and disables the OTA entry path. Never
-attempt a serial bootloader upload with multiple quadrants on the shared UART:
-they receive the same bytes and their responses would collide. Normal updates
-should remain ISP-based until the separately specified managed update path lands.
+MiniCore Urboot is installed by default before the application so addressed
+`fw-flash` updates remain available. `--no-bootloader` is a recovery/manufacturing
+escape hatch and disables that update path. Never attempt a plain avrdude serial
+upload with multiple quadrants on the shared UART: they receive the same bytes and
+their responses would collide. `fw-flash` is safe with all quadrants attached
+because the maintenance broadcast suppresses non-target responses first.
 
 Fuse programming is recoverability-sensitive. This setup is only for an
 ATmega328PB with an external 16 MHz crystal and 2.7 V brown-out.
 
-### Exercise application-to-bootloader entry
+## Update a quadrant over the ESP USB port
 
-Start with one isolated quadrant and a logic analyzer. Provision it normally,
-boot the application, then use the ESP console:
+Once a quadrant is provisioned with Urboot, application updates no longer need
+the ISP header. The ESP stages an Intel HEX image received over its own USB
+console, walks the target into the resident bootloader, programs and verifies
+every 128-byte page over the shared bus, and confirms the new application:
 
-```text
-fw-preflight 0
-fw-enter 0 0x12345678 12000 0x89abcdef 0x42
+```sh
+# Build firmware-atmega and flash quadrant 0 through the ESP's USB port
+tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 0 --build
+
+# Flash an existing image
+tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
+    --hex firmware-atmega/.pio/build/ATmega328PB/firmware.hex
 ```
 
-Arguments are node, one-time token, proposed application size, application CRC32,
-and update ID. Preflight prints the fuse, BOOTRST status, flash geometry, marker
-state, reset cause, and supply. Entry broadcasts maintenance, persists prepare
-metadata, commits with the repeated token, waits for the ACK, then stops polling.
+`--port` is auto-detected when exactly one USB serial device is attached. These
+tools are also exposed as PlatformIO project tasks (sidebar: Project Tasks →
+ATmega328PB → Custom): flash/provision per quadrant plus the protocol host
+tests, e.g. `pio run -d firmware-atmega -t flash_quadrant_0`.
 
-There is not yet a page-programming client behind this handoff. Urboot will time
-out and return to the existing application when it receives no synchronization.
-Run `fw-end 0x12345678` to resume ESP polling after the isolated test. The future
-STK500 writer/readback verifier belongs between entry ACK and `MAINTENANCE_END`.
+Close any open serial monitor first; the script owns the port. The full sequence
+per target is: `MAINTENANCE_BEGIN` broadcast (non-targets suppress responses),
+`FW_PREPARE` (CRC-protected EEPROM marker), `FW_ENTER_BOOTLOADER` (watchdog reset
+into Urboot), STK500 sync and page programming with complete readback verification
+at the 115200 bootloader baud, `MAINTENANCE_END`, then an `FW_HEALTH` check of the
+rebooted application and an acknowledged `FW_CONFIRM` that marks the image valid.
+Success is only reported after readback, health, and confirmation all pass.
+
+The bus runs at 38,400 baud but Urboot is built for 115200
+(`board_bootloader.speed`); the ESP switches its bus UART for the programming
+window only. If sync proves unreliable on the diode-OR return at that rate,
+rebuild and re-provision Urboot at a slower speed and change `kBootloaderBaud`
+in `firmware-esp/src/avr_flasher.cpp` to match. Quadrant LEDs freeze during the
+programming window because render broadcasts pause.
+
+If flashing fails, the target is left recoverable: Urboot times out back to the
+resident application, and re-running `fw-flash` retries from the top. ISP remains
+the root recovery method. Manual console equivalents (`fw-preflight`, `fw-flash
+<node>`, `fw-abort`, and the low-level `fw-enter`/`fw-end`) are listed under
+`help`. Updates happen one target at a time; repeat the script per node.
 
 ## Analog diagnostics
 

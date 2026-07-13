@@ -8,6 +8,19 @@ namespace arcade {
 constexpr uint8_t kProtocolVersion = 1;
 constexpr uint8_t kEspAddress = 0x80;
 constexpr uint8_t kBroadcastAddress = 0xff;
+constexpr uint8_t kInvalidNodeAddress = 0xff;
+constexpr uint8_t kQuadrantCount = 4;
+constexpr uint8_t kQuadrantsPerBoardEdge = 2;
+constexpr uint8_t kQuadrantWidth = 4;
+constexpr uint8_t kBoardWidth = kQuadrantsPerBoardEdge * kQuadrantWidth;
+constexpr uint8_t kSquaresPerQuadrant = kQuadrantWidth * kQuadrantWidth;
+constexpr uint8_t kBoardSquareCount = kBoardWidth * kBoardWidth;
+constexpr uint8_t kMaximumRawCaptureScans = 32;
+constexpr uint8_t kRenderFramesPerSecond = 25;
+constexpr uint32_t kBusBaud = 38400;
+constexpr uint32_t kAvrFlashBytes = 32768;
+constexpr uint16_t kAvrFlashPageBytes = 128;
+constexpr uint32_t kAvrApplicationLimit = 32384;
 constexpr size_t kHeaderSize = 8;
 constexpr size_t kCrcSize = 2;
 constexpr size_t kMaxPayload = 112;
@@ -67,6 +80,31 @@ enum class RuntimeMode : uint8_t {
   kNormal = 0,
   kBringup = 1,
 };
+
+enum class FirmwareState : uint8_t {
+  kNone = 0,
+  kRequested = 1,
+  kProgramming = 2,
+  kCandidate = 3,
+  kValid = 4,
+};
+
+// Numeric values are part of the UART wire contract and the factory EEPROM
+// tooling. Add new keys at the end so deployed tooling never changes meaning.
+enum class ConfigKey : uint8_t {
+  kEnterThreshold = 1,
+  kExitThreshold = 2,
+  kDebounceScans = 3,
+  kMuxSettleUs = 4,
+  kFullScanMs = 5,
+  kBrightness = 6,
+  kPositiveRgb565 = 7,
+  kNegativeRgb565 = 8,
+  kOrientation = 9,
+  kRuntimeMode = 10,
+};
+
+constexpr uint8_t configKey(ConfigKey key) { return static_cast<uint8_t>(key); }
 
 enum class DecodeResult : uint8_t {
   kNone,

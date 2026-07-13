@@ -42,8 +42,8 @@ LED refresh rate.
 | `0x62` | `FW_PREPARE` | `token:u32, update_id:u32, image_size:u32, image_crc32:u32` | echoed `token, update_id`; metadata is persisted before ACK |
 | `0x63` | `FW_ENTER_BOOTLOADER` | `token:u32, update_id:u32` | echoed values, followed by TX drain, LED shutdown, and watchdog reset |
 | `0x64` | `MAINTENANCE_END` | broadcast: `token:u32` | no response; normal framed traffic resumes |
-| `0x65` | `FW_HEALTH` | reserved for new-application health | reserved |
-| `0x66` | `FW_CONFIRM` | reserved for candidate confirmation | reserved |
+| `0x65` | `FW_HEALTH` | empty | `marker_state, reset_cause, uptime_ms:u32, update_id:u32, image_crc32:u32` |
+| `0x66` | `FW_CONFIRM` | `update_id:u32` | `update_id:u32, marker_state`; requires a candidate/valid marker with matching ID |
 
 `GET_RAW_SCAN` is intentionally a relatively long response: 99 payload bytes.
 Noise and state use compact 8-bit fields. The ESP requests quadrants one at a time. A
@@ -91,7 +91,7 @@ missing, `7` maintenance lease missing, and `8` token/update mismatch. Parsers c
 bad COBS, length, version, CRC, and destination failures; counters saturate rather
 than wrapping.
 
-## Bootloader handoff implemented for bring-up
+## Bootloader handoff and UART flashing
 
 The application implements the safe entry portion of the OTA design. `FW_PREPARE`
 is accepted only when the high fuse shows `BOOTRST=0`, the maintenance target is
@@ -104,7 +104,19 @@ marker to `programming`, ACKs and physically drains UART, turns every LED chain
 off, then uses a 15 ms watchdog reset. It never jumps to a literal flash address;
 the boot-reset fuse and resident bootloader own reset dispatch.
 
-The ESP stops framed traffic after the entry ACK. Page erase/write/readback and
-STK500/Urboot synchronization are deliberately the next layer. Non-target
-applications ignore programmer traffic during the 30-second maintenance lease and
-recover automatically when it expires.
+After the entry ACK the ESP stops framed traffic, switches its bus UART to the
+bootloader baud, and speaks STK500v1 to Urboot: sync, 128-byte page writes with
+bounded retries, then complete page readback verification. It then restores the
+bus baud and broadcasts `MAINTENANCE_END`. Non-target applications ignore
+programmer traffic during the 60-second maintenance lease and recover
+automatically when it expires.
+
+Marker states are `0` none, `1` requested, `2` programming, `3` candidate, and
+`4` valid. An application that boots with a `programming` marker promotes it to
+`candidate`: the handoff completed and this image is awaiting confirmation. The
+ESP polls `FW_HEALTH`, requires a candidate marker whose `update_id` and
+`image_crc32` match the staged image, and only then sends `FW_CONFIRM`, which
+persists the `valid` state. Flashing is reported successful only after readback,
+health, and confirmation all pass; on any failure the target is left with Urboot
+resident and re-entry is always possible. The USB-console front end for this flow
+is documented in [bringup.md](bringup.md).
