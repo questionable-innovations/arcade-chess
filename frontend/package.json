@@ -3,10 +3,14 @@
 	"private": true,
 	"version": "0.0.1",
 	"type": "module",
+	"packageManager": "pnpm@10.33.2",
+	"engines": {
+		"node": ">=24"
+	},
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
-		"deploy": "yarn build && wrangler deploy",
+		"deploy": "pnpm build && wrangler deploy",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -35,5 +39,12 @@
 		"typescript-eslint": "^8.60.1",
 		"vite": "^8.0.16",
 		"wrangler": "^4.110.0"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild",
+			"sharp",
+			"workerd"
+		]
 	}
 }
