@@ -48,11 +48,11 @@ class Sensors {
   void queueEvent(uint8_t square, uint32_t now_ms);
 
   Settings& settings_;
-  uint16_t raw_[16]{};
-  uint16_t filtered_[16]{};
-  arcade::SensorState state_[16]{};
-  arcade::SensorState candidate_[16]{};
-  uint8_t candidate_count_[16]{};
+  uint16_t raw_[arcade::kSquaresPerQuadrant]{};
+  uint16_t filtered_[arcade::kSquaresPerQuadrant]{};
+  arcade::SensorState state_[arcade::kSquaresPerQuadrant]{};
+  arcade::SensorState candidate_[arcade::kSquaresPerQuadrant]{};
+  uint8_t candidate_count_[arcade::kSquaresPerQuadrant]{};
   SensorEvent events_[bringup::kEventQueueSize]{};
   uint8_t event_head_ = 0;
   uint8_t event_tail_ = 0;
@@ -67,15 +67,15 @@ class Sensors {
   bool calibration_finished_ = false;
   bool calibration_ok_ = false;
   uint16_t calibration_scans_ = 0;
-  uint32_t calibration_sum_[16]{};
-  uint16_t calibration_min_[16]{};
-  uint16_t calibration_max_[16]{};
+  uint32_t calibration_sum_[arcade::kSquaresPerQuadrant]{};
+  uint16_t calibration_min_[arcade::kSquaresPerQuadrant]{};
+  uint16_t calibration_max_[arcade::kSquaresPerQuadrant]{};
   bool raw_capture_active_ = false;
   bool raw_capture_ready_ = false;
   uint8_t raw_capture_target_ = 0;
   uint8_t raw_capture_count_ = 0;
-  uint32_t raw_capture_sum_[16]{};
-  uint16_t raw_capture_average_[16]{};
+  uint32_t raw_capture_sum_[arcade::kSquaresPerQuadrant]{};
+  uint16_t raw_capture_average_[arcade::kSquaresPerQuadrant]{};
 };
 
 }  // namespace quadrant

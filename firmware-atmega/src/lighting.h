@@ -30,10 +30,10 @@ class Lighting {
 
   Settings& settings_;
   Sensors& sensors_;
-  CRGB primary_[32]{};
-  CRGB secondary_[32]{};
-  CRGB edge_a_[8]{};
-  CRGB edge_b_[8]{};
+  CRGB primary_[bringup::kSquareStripPixels]{};
+  CRGB secondary_[bringup::kSquareStripPixels]{};
+  CRGB edge_a_[bringup::kEdgeStripPixels]{};
+  CRGB edge_b_[bringup::kEdgeStripPixels]{};
   uint16_t override_mask_ = 0;
   uint8_t override_red_ = 0;
   uint8_t override_green_ = 0;

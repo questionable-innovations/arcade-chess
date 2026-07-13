@@ -7,6 +7,15 @@
 
 namespace quadrant {
 namespace {
+constexpr uint8_t kMaximumEventsPerResponse = 8;
+constexpr uint8_t kEventPayloadBytes = 8;
+constexpr uint8_t kRawHeaderBytes = 3;
+constexpr uint8_t kRawSquareBytes = 6;
+constexpr uint8_t kConfigEntryBytes = 3;
+constexpr uint16_t kAllSquaresMask = UINT16_MAX;
+static_assert(kRawSquareBytes == sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2,
+              "raw square wire layout changed");
+
 void saturatingIncrement(uint16_t& value) {
   if (value != UINT16_MAX) ++value;
 }
@@ -57,30 +66,36 @@ void ProtocolService::sendError(const arcade::Frame& request, uint8_t code) {
 }
 
 bool ProtocolService::applyConfig(uint8_t key, uint16_t value) {
-  switch (key) {
-    case 1:
-      if (value < 10 || value > 400 || value <= settings_.exit_threshold) return false;
+  switch (static_cast<arcade::ConfigKey>(key)) {
+    case arcade::ConfigKey::kEnterThreshold:
+      if (value < bringup::kMinimumEnterThreshold ||
+          value > bringup::kMaximumEnterThreshold ||
+          value <= settings_.exit_threshold) return false;
       settings_.enter_threshold = value; break;
-    case 2:
+    case arcade::ConfigKey::kExitThreshold:
       if (value >= settings_.enter_threshold) return false;
       settings_.exit_threshold = value; break;
-    case 3:
-      if (value < 1 || value > 20) return false;
+    case arcade::ConfigKey::kDebounceScans:
+      if (value < bringup::kMinimumDebounceScans ||
+          value > bringup::kMaximumDebounceScans) return false;
       settings_.debounce_scans = static_cast<uint8_t>(value); break;
-    case 4:
-      if (value < 5 || value > 500) return false;
+    case arcade::ConfigKey::kMuxSettleUs:
+      if (value < bringup::kMinimumMuxSettleUs ||
+          value > bringup::kMaximumMuxSettleUs) return false;
       settings_.mux_settle_us = value; break;
-    case 5:
-      if (value < 8 || value > 200) return false;
+    case arcade::ConfigKey::kFullScanMs:
+      if (value < bringup::kMinimumFullScanMs ||
+          value > bringup::kMaximumFullScanMs) return false;
       settings_.full_scan_ms = value; break;
-    case 6:
-      lighting_.setBrightness(static_cast<uint8_t>(value > 255 ? 255 : value)); break;
-    case 7: settings_.positive_rgb565 = value; break;
-    case 8: settings_.negative_rgb565 = value; break;
-    case 9:
-      if (value > 7) return false;
+    case arcade::ConfigKey::kBrightness:
+      lighting_.setBrightness(static_cast<uint8_t>(value > UINT8_MAX ? UINT8_MAX : value));
+      break;
+    case arcade::ConfigKey::kPositiveRgb565: settings_.positive_rgb565 = value; break;
+    case arcade::ConfigKey::kNegativeRgb565: settings_.negative_rgb565 = value; break;
+    case arcade::ConfigKey::kOrientation:
+      if (value > bringup::kMaximumOrientation) return false;
       settings_.orientation = value; break;
-    case 10:
+    case arcade::ConfigKey::kRuntimeMode:
       if (value > static_cast<uint8_t>(arcade::RuntimeMode::kBringup)) return false;
       settings_.runtime_mode = static_cast<arcade::RuntimeMode>(value); break;
     default: return false;
@@ -89,17 +104,17 @@ bool ProtocolService::applyConfig(uint8_t key, uint16_t value) {
 }
 
 uint16_t ProtocolService::configValue(uint8_t key) const {
-  switch (key) {
-    case 1: return settings_.enter_threshold;
-    case 2: return settings_.exit_threshold;
-    case 3: return settings_.debounce_scans;
-    case 4: return settings_.mux_settle_us;
-    case 5: return settings_.full_scan_ms;
-    case 6: return settings_.brightness;
-    case 7: return settings_.positive_rgb565;
-    case 8: return settings_.negative_rgb565;
-    case 9: return settings_.orientation;
-    case 10: return static_cast<uint8_t>(settings_.runtime_mode);
+  switch (static_cast<arcade::ConfigKey>(key)) {
+    case arcade::ConfigKey::kEnterThreshold: return settings_.enter_threshold;
+    case arcade::ConfigKey::kExitThreshold: return settings_.exit_threshold;
+    case arcade::ConfigKey::kDebounceScans: return settings_.debounce_scans;
+    case arcade::ConfigKey::kMuxSettleUs: return settings_.mux_settle_us;
+    case arcade::ConfigKey::kFullScanMs: return settings_.full_scan_ms;
+    case arcade::ConfigKey::kBrightness: return settings_.brightness;
+    case arcade::ConfigKey::kPositiveRgb565: return settings_.positive_rgb565;
+    case arcade::ConfigKey::kNegativeRgb565: return settings_.negative_rgb565;
+    case arcade::ConfigKey::kOrientation: return settings_.orientation;
+    case arcade::ConfigKey::kRuntimeMode: return static_cast<uint8_t>(settings_.runtime_mode);
     default: return 0;
   }
 }
@@ -143,14 +158,16 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       break;
     case arcade::MessageType::kPollEvents: {
       const uint8_t requested = request.payload_length ? request.payload[0] : 4;
-      const uint8_t maximum = requested > 8 ? 8 : requested;
+      const uint8_t maximum = requested > kMaximumEventsPerResponse
+          ? kMaximumEventsPerResponse : requested;
       uint8_t count = 0, offset = 1;
       SensorEvent event{};
       while (count < maximum && sensors_.popEvent(event)) {
         response.payload[offset++] = event.square;
         response.payload[offset++] = static_cast<uint8_t>(event.state);
         arcade::putU16(response.payload + offset, event.raw); offset += 2;
-        arcade::putU32(response.payload + offset, event.at_ms); offset += 4;
+        arcade::putU32(response.payload + offset, event.at_ms);
+        offset += sizeof(event.at_ms);
         ++count;
       }
       response.payload[0] = count;
@@ -159,9 +176,9 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
     }
     case arcade::MessageType::kGetSnapshot: {
       uint8_t offset = 0;
-      for (uint8_t i = 0; i < 16; ++i)
+      for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i)
         response.payload[offset++] = static_cast<uint8_t>(sensors_.state(i));
-      for (uint8_t i = 0; i < 16; ++i) {
+      for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
         arcade::putU16(response.payload + offset, sensors_.raw(i)); offset += 2;
       }
       response.payload_length = offset;
@@ -206,7 +223,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       break;
     case arcade::MessageType::kClearLighting: {
       const uint16_t mask = request.payload_length == 2
-          ? arcade::getU16(request.payload) : 0xffff;
+          ? arcade::getU16(request.payload) : kAllSquaresMask;
       lighting_.clear(mask); arcade::putU16(response.payload, mask);
       response.payload_length = 2;
       break;
@@ -214,7 +231,8 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
     case arcade::MessageType::kConfigGet: {
       const uint8_t requested_key = request.payload_length ? request.payload[0] : 0;
       uint8_t offset = 0;
-      for (uint8_t key = 1; key <= 10; ++key) {
+      for (uint8_t key = arcade::configKey(arcade::ConfigKey::kEnterThreshold);
+           key <= arcade::configKey(arcade::ConfigKey::kRuntimeMode); ++key) {
         if (requested_key && requested_key != key) continue;
         response.payload[offset++] = key;
         arcade::putU16(response.payload + offset, configValue(key)); offset += 2;
@@ -223,10 +241,11 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       break;
     }
     case arcade::MessageType::kConfigSet:
-      if (!request.payload_length || request.payload_length % 3) {
+      if (!request.payload_length || request.payload_length % kConfigEntryBytes) {
         sendError(request, 1); return;
       }
-      for (uint8_t offset = 0; offset < request.payload_length; offset += 3) {
+      for (uint8_t offset = 0; offset < request.payload_length;
+           offset += kConfigEntryBytes) {
         if (!applyConfig(request.payload[offset],
                          arcade::getU16(request.payload + offset + 1))) {
           sendError(request, 5); return;
@@ -253,8 +272,8 @@ void ProtocolService::serviceRawResponse() {
   auto response = makeResponse(raw_request_, arcade::MessageType::kRawScan);
   response.payload[0] = sensors_.rawCaptureSamples();
   arcade::putU16(response.payload + 1, system_info::supplyMillivolts());
-  uint8_t offset = 3;
-  for (uint8_t i = 0; i < 16; ++i) {
+  uint8_t offset = kRawHeaderBytes;
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
     arcade::putU16(response.payload + offset, sensors_.rawCaptureValue(i)); offset += 2;
     arcade::putU16(response.payload + offset, settings_.baseline[i]); offset += 2;
     response.payload[offset++] = settings_.noise[i];

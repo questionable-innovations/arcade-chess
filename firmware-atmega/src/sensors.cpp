@@ -17,7 +17,7 @@ void Sensors::begin() {
     pinMode(kMuxHighPins[bit], OUTPUT);
   }
   setMux(0);
-  for (uint8_t i = 0; i < 16; ++i) {
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
     filtered_[i] = settings_.baseline[i];
     state_[i] = arcade::SensorState::kEmpty;
     candidate_[i] = arcade::SensorState::kEmpty;
@@ -47,7 +47,7 @@ void Sensors::tick(uint32_t now_us, uint32_t now_ms) {
   const uint16_t low = analogRead(A0);
   const uint16_t high = analogRead(A1);
   const uint8_t low_index = channel_;
-  const uint8_t high_index = channel_ + 8;
+  const uint8_t high_index = channel_ + bringup::kMuxChannelCount;
   raw_[low_index] = low;
   raw_[high_index] = high;
   filtered_[low_index] = static_cast<uint16_t>(filtered_[low_index] +
@@ -55,12 +55,13 @@ void Sensors::tick(uint32_t now_us, uint32_t now_ms) {
   filtered_[high_index] = static_cast<uint16_t>(filtered_[high_index] +
       (static_cast<int16_t>(high) - static_cast<int16_t>(filtered_[high_index])) / 4);
 
-  channel_ = static_cast<uint8_t>((channel_ + 1) & 7);
+  channel_ = static_cast<uint8_t>((channel_ + 1) % bringup::kMuxChannelCount);
   if (channel_ == 0) completeScan(now_ms);
   setMux(channel_);
   phase_ = 0;
   const uint32_t step_us =
-      (static_cast<uint32_t>(settings_.full_scan_ms) * 1000UL) / 8UL;
+      (static_cast<uint32_t>(settings_.full_scan_ms) * 1000UL) /
+      bringup::kMuxChannelCount;
   deadline_us_ = micros() + (step_us > settings_.mux_settle_us
       ? step_us - settings_.mux_settle_us : settings_.mux_settle_us);
 }
@@ -69,9 +70,9 @@ void Sensors::completeScan(uint32_t now_ms) {
   ++scan_count_;
   last_scan_ms_ = static_cast<uint16_t>(now_ms);
   if (raw_capture_active_) {
-    for (uint8_t i = 0; i < 16; ++i) raw_capture_sum_[i] += raw_[i];
+    for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) raw_capture_sum_[i] += raw_[i];
     if (++raw_capture_count_ >= raw_capture_target_) {
-      for (uint8_t i = 0; i < 16; ++i) {
+      for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
         raw_capture_average_[i] = static_cast<uint16_t>(raw_capture_sum_[i] / raw_capture_count_);
       }
       raw_capture_active_ = false;
@@ -79,19 +80,20 @@ void Sensors::completeScan(uint32_t now_ms) {
     }
   }
   if (calibration_active_) {
-    for (uint8_t i = 0; i < 16; ++i) {
+    for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
       calibration_sum_[i] += raw_[i];
       if (raw_[i] < calibration_min_[i]) calibration_min_[i] = raw_[i];
       if (raw_[i] > calibration_max_[i]) calibration_max_[i] = raw_[i];
     }
     if (++calibration_scans_ >= bringup::kCalibrationScans) {
       calibration_ok_ = true;
-      for (uint8_t i = 0; i < 16; ++i) {
+      for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
         const uint16_t range = calibration_max_[i] - calibration_min_[i];
         settings_.baseline[i] = static_cast<uint16_t>(
             calibration_sum_[i] / calibration_scans_);
         settings_.noise[i] = range > 255 ? 255 : static_cast<uint8_t>(range);
-        if (settings_.baseline[i] < 120 || settings_.baseline[i] > 900 ||
+        if (settings_.baseline[i] < bringup::kMinimumCalibrationBaseline ||
+            settings_.baseline[i] > bringup::kMaximumCalibrationBaseline ||
             range > bringup::kMaximumCalibrationNoise) calibration_ok_ = false;
       }
       settings_.calibrated = calibration_ok_ ? 1 : 0;
@@ -101,7 +103,7 @@ void Sensors::completeScan(uint32_t now_ms) {
     }
     return;
   }
-  for (uint8_t i = 0; i < 16; ++i) updateClassification(i, now_ms);
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) updateClassification(i, now_ms);
 }
 
 void Sensors::updateClassification(uint8_t square, uint32_t now_ms) {
@@ -158,7 +160,7 @@ bool Sensors::popEvent(SensorEvent& event) {
 
 void Sensors::startCalibration() {
   memset(calibration_sum_, 0, sizeof(calibration_sum_));
-  for (uint8_t i = 0; i < 16; ++i) {
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
     calibration_min_[i] = UINT16_MAX;
     calibration_max_[i] = 0;
   }
@@ -188,7 +190,7 @@ bool Sensors::calibrationJustFinished() {
 
 bool Sensors::startRawCapture(uint8_t samples) {
   if (raw_capture_active_ || raw_capture_ready_) return false;
-  raw_capture_target_ = constrain(samples, 1, 32);
+  raw_capture_target_ = constrain(samples, 1, arcade::kMaximumRawCaptureScans);
   raw_capture_count_ = 0;
   memset(raw_capture_sum_, 0, sizeof(raw_capture_sum_));
   raw_capture_active_ = true;

@@ -13,7 +13,10 @@ void Diagnostics::tick(uint32_t now_ms) {
   next_dump_ms_ = now_ms + 250;
   Serial.print(F("RAW,")); Serial.print(identity_.node_id); Serial.print(',');
   Serial.print(now_ms);
-  for (uint8_t i = 0; i < 16; ++i) { Serial.print(','); Serial.print(sensors_.raw(i)); }
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+    Serial.print(',');
+    Serial.print(sensors_.raw(i));
+  }
   Serial.println();
 #else
   (void)now_ms;

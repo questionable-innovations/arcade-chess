@@ -3,11 +3,12 @@
 #include <string.h>
 
 void Console::begin(Preferences& preferences, AppConfig& config, BusManager& bus,
-                    NetworkManager& network) {
+                    NetworkManager& network, AvrFlasher& flasher) {
   preferences_ = &preferences;
   config_ = &config;
   bus_ = &bus;
   network_ = &network;
+  flasher_ = &flasher;
 }
 
 void Console::printHelp() const {
@@ -18,7 +19,8 @@ void Console::printHelp() const {
     "  identify <node> [ms] | brightness <node> <0-255>\n"
     "  config <node> <key> <value> | wifi <ssid> <password>\n"
     "  fw-preflight <node>\n"
-    "  fw-enter <node> <token> <size> <crc32> <update-id> | fw-end <token>\n"
+    "  fw-flash <node> (then stream Intel HEX; see tools/flash-quadrant.py)\n"
+    "  fw-abort | fw-enter <node> <token> <size> <crc32> <update-id> | fw-end <token>\n"
     "  device-id <id> | token <bearer-token> | reboot\n"
     "Config keys: 1 enter, 2 exit, 3 debounce, 4 settle_us, 5 scan_ms,\n"
     "             6 brightness, 7 positive_rgb565, 8 negative_rgb565,\n"
@@ -48,6 +50,12 @@ void Console::setMode(const char* value) {
 }
 
 void Console::execute(char* line) {
+  // During a hex upload every line belongs to the flasher except an abort.
+  if (flasher_->receiving()) {
+    if (!strcmp(line, "fw-abort")) flasher_->abort("user abort");
+    else flasher_->consumeLine(line);
+    return;
+  }
   char* save = nullptr;
   const char* command = strtok_r(line, " ", &save);
   if (!command) return;
@@ -103,6 +111,13 @@ void Console::execute(char* line) {
     const char* node = strtok_r(nullptr, " ", &save);
     if (node) Serial.printf("firmware preflight: %s\n",
         bus_->firmwarePreflight(strtoul(node, nullptr, 0)) ? "queued" : "rejected");
+  } else if (!strcmp(command, "fw-flash")) {
+    const char* node = strtok_r(nullptr, " ", &save);
+    if (!node) Serial.println(F("usage: fw-flash <node>"));
+    else if (!flasher_->start(strtoul(node, nullptr, 0)))
+      Serial.println(F("fw-flash rejected (busy, offline, or bad node)"));
+  } else if (!strcmp(command, "fw-abort")) {
+    flasher_->abort("user abort");
   } else if (!strcmp(command, "fw-enter")) {
     const char* node = strtok_r(nullptr, " ", &save);
     const char* token = strtok_r(nullptr, " ", &save);

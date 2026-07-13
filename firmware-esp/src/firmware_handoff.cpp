@@ -13,7 +13,8 @@ bool BusManager::beginFirmwareHandoff(uint8_t node, uint32_t token, uint32_t upd
   uint8_t begin[7];
   begin[0] = node;
   arcade::putU32(begin + 1, token);
-  arcade::putU16(begin + 5, 30000);
+  // Lease must outlast full page programming + readback at the bootloader baud.
+  arcade::putU16(begin + 5, 60000);
   uint8_t prepare[16];
   arcade::putU32(prepare, token);
   arcade::putU32(prepare + 4, update_id);

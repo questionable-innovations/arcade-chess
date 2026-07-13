@@ -12,10 +12,10 @@ struct QuadrantState {
   uint16_t timeouts = 0;
   uint16_t bad_frames = 0;
   uint8_t consecutive_timeouts = 0;
-  uint16_t raw[16]{};
-  uint16_t baseline[16]{};
-  uint8_t noise[16]{};
-  arcade::SensorState state[16]{};
+  uint16_t raw[arcade::kSquaresPerQuadrant]{};
+  uint16_t baseline[arcade::kSquaresPerQuadrant]{};
+  uint8_t noise[arcade::kSquaresPerQuadrant]{};
+  arcade::SensorState state[arcade::kSquaresPerQuadrant]{};
 };
 
 struct BusCallbacks {
@@ -24,6 +24,8 @@ struct BusCallbacks {
   void (*rawScanReady)(bool complete, uint32_t scan_id) = nullptr;
   void (*commandComplete)(const char* correlation, bool ok, const char* reason) = nullptr;
   void (*nodePresenceChanged)(uint8_t node, bool online) = nullptr;
+  void (*fwResponse)(uint8_t node, arcade::MessageType type, bool ok,
+                     const uint8_t* payload, uint8_t length) = nullptr;
 };
 
 class BusManager {
@@ -60,14 +62,20 @@ class BusManager {
   uint32_t badFrames() const { return bad_frames_; }
   uint32_t timeoutCount() const { return timeout_count_; }
   bool busy() const { return pending_ || queue_count_ || raw_active_; }
+  bool programmingHandoff() const { return programming_handoff_; }
+  uint32_t maintenanceToken() const { return maintenance_token_; }
 
  private:
+  static constexpr uint8_t kQueueCapacity = 8;
+  static constexpr uint8_t kMaximumQueuedPayload = 24;
+  static constexpr uint8_t kMaximumCorrelationLength = 32;
+
   struct QueuedCommand {
     uint8_t node = 0;
     arcade::MessageType type = arcade::MessageType::kPing;
-    uint8_t payload[24]{};
+    uint8_t payload[kMaximumQueuedPayload]{};
     uint8_t length = 0;
-    char correlation[33]{};
+    char correlation[kMaximumCorrelationLength + 1]{};
   };
 
   void receive(uint32_t now_ms);
@@ -86,9 +94,9 @@ class BusManager {
   HardwareSerial* serial_ = nullptr;
   BusCallbacks callbacks_{};
   arcade::StreamDecoder decoder_;
-  QuadrantState nodes_[4]{};
-  uint8_t orientation_[4]{};
-  QueuedCommand queue_[8]{};
+  QuadrantState nodes_[arcade::kQuadrantCount]{};
+  uint8_t orientation_[arcade::kQuadrantCount]{};
+  QueuedCommand queue_[kQueueCapacity]{};
   uint8_t queue_head_ = 0;
   uint8_t queue_tail_ = 0;
   uint8_t queue_count_ = 0;
@@ -97,11 +105,11 @@ class BusManager {
   uint8_t pending_sequence_ = 0;
   arcade::MessageType pending_type_ = arcade::MessageType::kPing;
   uint32_t deadline_ms_ = 0;
-  char pending_correlation_[33]{};
+  char pending_correlation_[kMaximumCorrelationLength + 1]{};
   uint8_t sequence_ = 0;
   uint8_t poll_node_ = 0;
-  uint8_t poll_count_[4]{};
-  uint32_t next_poll_ms_[4]{};
+  uint8_t poll_count_[arcade::kQuadrantCount]{};
+  uint32_t next_poll_ms_[arcade::kQuadrantCount]{};
   uint32_t next_render_ms_ = 0;
   uint32_t bus_quiet_until_ms_ = 0;
   uint32_t good_frames_ = 0;
@@ -114,7 +122,7 @@ class BusManager {
   uint8_t raw_done_mask_ = 0;
   uint8_t raw_response_mask_ = 0;
   uint32_t raw_scan_id_ = 0;
-  char raw_correlation_[33]{};
+  char raw_correlation_[kMaximumCorrelationLength + 1]{};
   bool programming_handoff_ = false;
   uint32_t maintenance_token_ = 0;
   arcade::RuntimeMode runtime_mode_ = arcade::RuntimeMode::kNormal;

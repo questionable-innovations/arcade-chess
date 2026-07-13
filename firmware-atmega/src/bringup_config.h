@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <arcade_protocol/protocol.h>
 
 namespace bringup {
 
@@ -16,7 +17,27 @@ constexpr uint16_t kDefaultNegativeRgb565 = 0x001f;  // blue
 constexpr uint8_t kCalibrationScans = 128;
 constexpr uint16_t kMaximumCalibrationNoise = 40;
 constexpr uint8_t kEventQueueSize = 16;
-constexpr uint8_t kLedFramesPerSecond = 25;
+constexpr uint8_t kLedFramesPerSecond = arcade::kRenderFramesPerSecond;
+constexpr uint8_t kMuxChannelCount = 8;
+constexpr uint8_t kPixelsPerSquare = 2;
+constexpr uint8_t kSquareStripPixels = arcade::kSquaresPerQuadrant * kPixelsPerSquare;
+constexpr uint8_t kEdgeStripPixels = 8;
+constexpr uint16_t kIdentifyBlinkMs = 180;
+constexpr uint8_t kIdentifyRed = 255;
+constexpr uint8_t kIdentifyGreen = 72;
+constexpr uint8_t kIdentifyBlue = 0;
+constexpr uint16_t kDefaultAdcMidpoint = 512;
+constexpr uint16_t kMinimumCalibrationBaseline = 120;
+constexpr uint16_t kMaximumCalibrationBaseline = 900;
+constexpr uint16_t kMinimumEnterThreshold = 10;
+constexpr uint16_t kMaximumEnterThreshold = 400;
+constexpr uint8_t kMinimumDebounceScans = 1;
+constexpr uint8_t kMaximumDebounceScans = 20;
+constexpr uint16_t kMinimumMuxSettleUs = 5;
+constexpr uint16_t kMaximumMuxSettleUs = 500;
+constexpr uint16_t kMinimumFullScanMs = 8;
+constexpr uint16_t kMaximumFullScanMs = 200;
+constexpr uint8_t kMaximumOrientation = 7;
 
 // MiniCore's ATmega328PB variant exposes all four PE pins with these macros.
 // Failing at compile time is safer than silently driving a guessed pin.

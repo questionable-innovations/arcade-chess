@@ -6,7 +6,16 @@
 
 namespace quadrant {
 
-void FirmwareUpdate::begin() { loadUpdateMarker(marker_); }
+void FirmwareUpdate::begin() {
+  // A kProgramming marker surviving into a running application means the
+  // bootloader handoff completed and this image booted; it becomes the
+  // candidate awaiting an explicit FW_CONFIRM from the ESP.
+  if (loadUpdateMarker(marker_) && marker_.state == UpdateState::kProgramming &&
+      marker_.node_id == identity_.node_id) {
+    marker_.state = UpdateState::kCandidate;
+    saveUpdateMarker(marker_);
+  }
+}
 
 bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
   if (request.destination != arcade::kBroadcastAddress ||
@@ -87,6 +96,31 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
       arcade::putU32(response.payload + 4, update_id);
       response.payload_length = 8;
       reset_pending_ = true;
+      return true;
+    }
+
+    case arcade::MessageType::kFwHealth:
+      response.payload[0] = static_cast<uint8_t>(marker_.state);
+      response.payload[1] = system_info::resetCause();
+      arcade::putU32(response.payload + 2, millis());
+      arcade::putU32(response.payload + 6, marker_.update_id);
+      arcade::putU32(response.payload + 10, marker_.image_crc32);
+      response.payload_length = 14;
+      return true;
+
+    case arcade::MessageType::kFwConfirm: {
+      if (request.payload_length != 4) { error_code = 1; return true; }
+      const uint32_t update_id = arcade::getU32(request.payload);
+      const bool candidate = marker_.state == UpdateState::kCandidate ||
+                             marker_.state == UpdateState::kValid;
+      if (!candidate || marker_.update_id != update_id) { error_code = 8; return true; }
+      if (marker_.state != UpdateState::kValid) {
+        marker_.state = UpdateState::kValid;
+        saveUpdateMarker(marker_);
+      }
+      arcade::putU32(response.payload, marker_.update_id);
+      response.payload[4] = static_cast<uint8_t>(marker_.state);
+      response.payload_length = 5;
       return true;
     }
 

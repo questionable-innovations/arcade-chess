@@ -29,8 +29,8 @@ struct __attribute__((packed)) Settings {
   uint16_t positive_rgb565;
   uint16_t negative_rgb565;
   uint8_t orientation;
-  uint16_t baseline[16];
-  uint8_t noise[16];
+  uint16_t baseline[arcade::kSquaresPerQuadrant];
+  uint8_t noise[arcade::kSquaresPerQuadrant];
   arcade::RuntimeMode runtime_mode;
   uint8_t calibrated;
   uint16_t crc;

@@ -56,8 +56,8 @@ void loadDefaultSettings(Settings& s) {
   s.positive_rgb565 = bringup::kDefaultPositiveRgb565;
   s.negative_rgb565 = bringup::kDefaultNegativeRgb565;
   s.runtime_mode = arcade::RuntimeMode::kNormal;
-  for (uint8_t i = 0; i < 16; ++i) {
-    s.baseline[i] = 512;
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+    s.baseline[i] = bringup::kDefaultAdcMidpoint;
     s.noise[i] = 4;
   }
 }
@@ -65,9 +65,11 @@ void loadDefaultSettings(Settings& s) {
 bool loadSettings(Settings& settings) {
   EEPROM.get(kSettingsEepromAddress, settings);
   const bool valid = settings.magic == kSettingsMagic && settings.version == 1 &&
-      settings.enter_threshold >= 10 && settings.enter_threshold <= 400 &&
+      settings.enter_threshold >= bringup::kMinimumEnterThreshold &&
+      settings.enter_threshold <= bringup::kMaximumEnterThreshold &&
       settings.exit_threshold < settings.enter_threshold &&
-      settings.debounce_scans >= 1 && settings.debounce_scans <= 20 &&
+      settings.debounce_scans >= bringup::kMinimumDebounceScans &&
+      settings.debounce_scans <= bringup::kMaximumDebounceScans &&
       static_cast<uint8_t>(settings.runtime_mode) <=
           static_cast<uint8_t>(arcade::RuntimeMode::kBringup) &&
       settings.crc == storageCrc(reinterpret_cast<const uint8_t*>(&settings),
