@@ -10,12 +10,14 @@ constexpr uint16_t kDefaultIdentifyMs = 3000;
 constexpr uint16_t kRestartFlushMs = 50;
 }
 
-void NetworkManager::sendResult(const char* id, const char* status, const char* reason) {
+void NetworkManager::sendResult(const char* id, const char* status, const char* reason,
+                                JsonVariantConst data) {
   if (!welcomed_) return;
   JsonDocument doc;
   doc["v"] = 1; doc["type"] = "command.result"; doc["device_id"] = config_->device_id;
   doc["id"] = id; doc["status"] = status;
   if (reason) doc["reason"] = reason; else doc["reason"] = nullptr;
+  if (!data.isNull()) doc["data"] = data;
   String json; serializeJson(doc, json); sendJson(json);
 }
 

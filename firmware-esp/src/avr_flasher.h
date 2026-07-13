@@ -5,7 +5,7 @@
 #include "bus_manager.h"
 
 // Flashes a quadrant application over the shared bus UART using the resident
-// urboot/STK500v1 bootloader. The image arrives as Intel HEX lines on the USB
+// urboot urprotocol. The image arrives as Intel HEX lines on the USB
 // console (see tools/flash-quadrant.py), is staged in RAM, then programmed and
 // read back after the existing FW_PREPARE/FW_ENTER_BOOTLOADER handoff.
 class AvrFlasher {
@@ -40,13 +40,12 @@ class AvrFlasher {
   void finishSuccess();
   void restoreBusBaud();
 
-  bool stkCommand(const uint8_t* request, size_t request_length,
-                  uint8_t* response, size_t response_length, uint32_t timeout_ms);
-  bool stkSync();
-  bool stkLoadAddress(uint16_t word_address);
-  bool stkProgramPage(uint32_t byte_address);
-  bool stkVerifyPage(uint32_t byte_address);
-  bool stkLeaveProgmode();
+  bool urCommand(const uint8_t* request, size_t request_length,
+                 uint8_t* response, size_t response_length, uint32_t timeout_ms);
+  bool urSync();
+  bool urProgramPage(uint32_t byte_address);
+  bool urVerifyPage(uint32_t byte_address);
+  bool urLeaveProgmode();
 
   BusManager* bus_ = nullptr;
   HardwareSerial* serial_ = nullptr;

@@ -51,7 +51,7 @@ if env["PIOENV"] == "ATmega328PB":
         env.AddCustomTarget(
             name=f"provision_quadrant_{node}",
             dependencies=None,
-            actions=[f'sh "{TOOLS}/provision-quadrant.sh" --id {node} --yes'],
+            actions=[f'"{TOOLS}/provision-quadrant.sh" --id {node} --yes'],
             title=f"Provision quadrant {node} (ISP)",
             description="Fuses, Urboot, application, and identity EEPROM via USBasp",
         )

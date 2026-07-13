@@ -10,15 +10,15 @@ constexpr uint32_t kBusBaud = arcade::kBusBaud;
 // Must match board_bootloader.speed in firmware-atmega/platformio.ini. If sync
 // proves unreliable on the diode-OR return at this rate, rebuild urboot slower.
 constexpr uint32_t kBootloaderBaud = 115200;
-constexpr uint8_t kStkInSync = 0x14;
-constexpr uint8_t kStkOk = 0x10;
+// This provisioned urboot u8.0 build encodes its MCU/features in response bytes.
+constexpr uint8_t kUrInSync = 0xa0;
+constexpr uint8_t kUrOk = 0x78;
 constexpr uint8_t kCrcEop = 0x20;
-constexpr uint8_t kStkGetSync = 0x30;
-constexpr uint8_t kStkLoadAddress = 0x55;
-constexpr uint8_t kStkProgramPage = 0x64;
-constexpr uint8_t kStkReadPage = 0x74;
-constexpr uint8_t kStkLeaveProgmode = 0x51;
-constexpr uint8_t kStkResponseOverhead = 2;
+constexpr uint8_t kUrGetSync = 0x30;
+constexpr uint8_t kUrProgramFlashPage = 0x02;
+constexpr uint8_t kUrReadFlashPage = 0x03;
+constexpr uint8_t kUrLeaveProgmode = 0x51;
+constexpr uint8_t kUrResponseOverhead = 2;
 constexpr uint8_t kMaximumPageRetries = 3;
 constexpr uint8_t kMaximumHealthPollRetries = 4;
 constexpr uint8_t kMaximumSyncAttempts = 80;
@@ -28,7 +28,6 @@ constexpr uint32_t kBootResetDelayMs = 50;
 constexpr uint32_t kApplicationBootDelayMs = 1500;
 constexpr uint32_t kHealthResponseTimeoutMs = 3000;
 constexpr uint32_t kSyncCommandTimeoutMs = 80;
-constexpr uint32_t kLoadAddressTimeoutMs = 150;
 constexpr uint32_t kPageCommandTimeoutMs = 400;
 constexpr uint32_t kLeaveProgrammingTimeoutMs = 300;
 constexpr uint16_t kSerialPollDelayUs = 200;
@@ -218,7 +217,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
 
     case Phase::kSync:
       if (static_cast<int32_t>(now_ms - deadline_ms_) < 0) return;
-      if (stkSync()) {
+      if (urSync()) {
         Serial.printf("SYNC ok after %u attempt(s)\n", sync_attempts_ + 1);
         phase_ = Phase::kProgram;
         page_ = 0;
@@ -233,8 +232,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
 
     case Phase::kProgram: {
       const uint32_t address = static_cast<uint32_t>(page_) * kPageSize;
-      if (stkLoadAddress(static_cast<uint16_t>(address >> 1)) &&
-          stkProgramPage(address)) {
+      if (urProgramPage(address)) {
         page_retries_ = 0;
         if (++page_ >= page_count_) { phase_ = Phase::kVerify; page_ = 0; return; }
         if (!(page_ % kProgressPageInterval)) {
@@ -248,8 +246,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
 
     case Phase::kVerify: {
       const uint32_t address = static_cast<uint32_t>(page_) * kPageSize;
-      if (stkLoadAddress(static_cast<uint16_t>(address >> 1)) &&
-          stkVerifyPage(address)) {
+      if (urVerifyPage(address)) {
         page_retries_ = 0;
         if (++page_ < page_count_) {
           if (!(page_ % kProgressPageInterval)) {
@@ -258,7 +255,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
           return;
         }
         Serial.println(F("VERIFY ok; leaving bootloader"));
-        stkLeaveProgmode();
+        urLeaveProgmode();
         restoreBusBaud();
         bus_->endFirmwareMaintenance(token_);
         phase_ = Phase::kAwaitBoot;
@@ -361,14 +358,14 @@ void AvrFlasher::restoreBusBaud() {
   while (serial_->available()) serial_->read();
 }
 
-bool AvrFlasher::stkCommand(const uint8_t* request, size_t request_length,
-                            uint8_t* response, size_t response_length,
-                            uint32_t timeout_ms) {
+bool AvrFlasher::urCommand(const uint8_t* request, size_t request_length,
+                           uint8_t* response, size_t response_length,
+                           uint32_t timeout_ms) {
   while (serial_->available()) serial_->read();
   serial_->write(request, request_length);
   serial_->flush();
-  uint8_t framed[kStkResponseOverhead + kPageSize];
-  const size_t total = response_length + kStkResponseOverhead;
+  uint8_t framed[kUrResponseOverhead + kPageSize];
+  const size_t total = response_length + kUrResponseOverhead;
   if (total > sizeof(framed)) return false;
   const uint32_t deadline = millis() + timeout_ms;
   size_t received = 0;
@@ -378,46 +375,41 @@ bool AvrFlasher::stkCommand(const uint8_t* request, size_t request_length,
     if (value < 0) { delayMicroseconds(kSerialPollDelayUs); continue; }
     framed[received++] = static_cast<uint8_t>(value);
   }
-  if (framed[0] != kStkInSync || framed[total - 1] != kStkOk) return false;
+  if (framed[0] != kUrInSync || framed[total - 1] != kUrOk) return false;
   if (response_length) memcpy(response, framed + 1, response_length);
   return true;
 }
 
-bool AvrFlasher::stkSync() {
-  const uint8_t request[] = {kStkGetSync, kCrcEop};
-  return stkCommand(request, sizeof(request), nullptr, 0, kSyncCommandTimeoutMs);
+bool AvrFlasher::urSync() {
+  const uint8_t request[] = {kUrGetSync, kCrcEop};
+  return urCommand(request, sizeof(request), nullptr, 0, kSyncCommandTimeoutMs);
 }
 
-bool AvrFlasher::stkLoadAddress(uint16_t word_address) {
-  // STK500v1 addresses flash in words even though page data is byte-oriented.
-  const uint8_t request[] = {kStkLoadAddress, static_cast<uint8_t>(word_address),
-                             static_cast<uint8_t>(word_address >> 8), kCrcEop};
-  return stkCommand(request, sizeof(request), nullptr, 0, kLoadAddressTimeoutMs);
-}
-
-bool AvrFlasher::stkProgramPage(uint32_t byte_address) {
+bool AvrFlasher::urProgramPage(uint32_t byte_address) {
   uint8_t request[4 + kPageSize + 1];
-  request[0] = kStkProgramPage;
-  request[1] = static_cast<uint8_t>(kPageSize >> 8);
-  request[2] = static_cast<uint8_t>(kPageSize);
-  request[3] = 'F';
+  request[0] = kUrProgramFlashPage;
+  // Urprotocol carries the direct byte address, low byte first.
+  request[1] = static_cast<uint8_t>(byte_address);
+  request[2] = static_cast<uint8_t>(byte_address >> 8);
+  request[3] = static_cast<uint8_t>(kPageSize);
   memcpy(request + 4, image_ + byte_address, kPageSize);
   request[4 + kPageSize] = kCrcEop;
-  return stkCommand(request, sizeof(request), nullptr, 0, kPageCommandTimeoutMs);
+  return urCommand(request, sizeof(request), nullptr, 0, kPageCommandTimeoutMs);
 }
 
-bool AvrFlasher::stkVerifyPage(uint32_t byte_address) {
-  const uint8_t request[] = {kStkReadPage,
-                             static_cast<uint8_t>(kPageSize >> 8),
-                             static_cast<uint8_t>(kPageSize), 'F', kCrcEop};
+bool AvrFlasher::urVerifyPage(uint32_t byte_address) {
+  const uint8_t request[] = {kUrReadFlashPage,
+                             static_cast<uint8_t>(byte_address),
+                             static_cast<uint8_t>(byte_address >> 8),
+                             static_cast<uint8_t>(kPageSize), kCrcEop};
   uint8_t page[kPageSize];
-  if (!stkCommand(request, sizeof(request), page, kPageSize,
-                  kPageCommandTimeoutMs)) return false;
+  if (!urCommand(request, sizeof(request), page, kPageSize,
+                 kPageCommandTimeoutMs)) return false;
   return memcmp(page, image_ + byte_address, kPageSize) == 0;
 }
 
-bool AvrFlasher::stkLeaveProgmode() {
-  const uint8_t request[] = {kStkLeaveProgmode, kCrcEop};
-  return stkCommand(request, sizeof(request), nullptr, 0,
-                    kLeaveProgrammingTimeoutMs);
+bool AvrFlasher::urLeaveProgmode() {
+  const uint8_t request[] = {kUrLeaveProgmode, kCrcEop};
+  return urCommand(request, sizeof(request), nullptr, 0,
+                   kLeaveProgrammingTimeoutMs);
 }

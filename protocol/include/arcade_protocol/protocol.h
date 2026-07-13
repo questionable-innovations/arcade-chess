@@ -20,7 +20,13 @@ constexpr uint8_t kRenderFramesPerSecond = 25;
 constexpr uint32_t kBusBaud = 38400;
 constexpr uint32_t kAvrFlashBytes = 32768;
 constexpr uint16_t kAvrFlashPageBytes = 128;
-constexpr uint32_t kAvrApplicationLimit = 32384;
+// Provisioned BOOTSZ=11 reserves 256 words; boot flash starts at 0x7E00.
+constexpr uint16_t kAvrBootSectionBytes = 512;
+constexpr uint32_t kAvrApplicationLimit = 32256;
+static_assert(kAvrApplicationLimit == kAvrFlashBytes - kAvrBootSectionBytes,
+              "AVR application limit must end at the boot section");
+static_assert(kAvrApplicationLimit % kAvrFlashPageBytes == 0,
+              "AVR application limit must be page-aligned");
 constexpr size_t kHeaderSize = 8;
 constexpr size_t kCrcSize = 2;
 constexpr size_t kMaxPayload = 112;
