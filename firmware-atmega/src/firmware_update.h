@@ -30,6 +30,7 @@ class FirmwareUpdate {
   Lighting& lighting_;
   UpdateMarker marker_{};
   bool reset_pending_ = false;
+  bool bootloader_responder_ = true;
   bool maintenance_active_ = false;
   uint8_t maintenance_target_ = arcade::kInvalidNodeAddress;
   uint32_t maintenance_token_ = 0;

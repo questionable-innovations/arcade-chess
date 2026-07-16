@@ -52,6 +52,9 @@ class BusManager {
   bool beginFirmwareHandoff(uint8_t node, uint32_t token, uint32_t update_id,
                             uint32_t image_size, uint32_t image_crc32,
                             const char* correlation = nullptr);
+  bool beginFirmwareHandoffAll(uint8_t leader, uint8_t target_mask, uint32_t token,
+                               uint32_t update_id, uint32_t image_size,
+                               uint32_t image_crc32);
   void endFirmwareMaintenance(uint32_t token);
   bool setGlobalSquares(const uint8_t* squares, size_t count, uint8_t red,
                         uint8_t green, uint8_t blue, uint16_t duration_ms,

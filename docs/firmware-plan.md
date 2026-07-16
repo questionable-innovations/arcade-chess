@@ -213,7 +213,7 @@ ATmega OTA is an addressed maintenance operation coordinated by the ESP, not a n
 - Do not jump from a UART ISR or hard-code a boot address in the application. An addressed two-phase command stores a CRC-protected EEPROM update marker, ACKs and drains UART, makes outputs safe, then uses a watchdog software reset. The bootloader build/linker owns its start address.
 - The bootloader runs first after every reset. A requested/programming marker or invalid application keeps it in recovery mode; a valid normal boot takes only a short boot window.
 - There is no dual-bank rollback. Recovery means the protected bootloader stays available so the ESP can safely rewrite the complete application. ISP remains the root recovery method.
-- Maintenance is exclusive. The ESP broadcasts a bounded no-response quiet lease, updates one target at a time, and temporarily changes the shared bus from framed traffic to the bootloader protocol. Non-target nodes continue local sensing/animation but suppress responses and ignore raw programmer bytes.
+- Maintenance is exclusive. The ESP broadcasts a bounded no-response quiet lease and temporarily changes the shared bus from framed traffic to the bootloader protocol. It may update one addressed target, or broadcast an identical image to all quadrants while one selected leader responds and the rest silently execute the same commands.
 
 ### Artifact and programming
 
@@ -225,7 +225,7 @@ ATmega OTA is an addressed maintenance operation coordinated by the ESP, not a n
 
 ### Website and backend workflow
 
-The browser uploads to the Rust backend, which validates and stores the artifact and creates a durable update job. An authorized operator selects a board and compatible target(s). The ESP downloads the artifact over authenticated HTTPS and updates multiple quadrants sequentially. Browser loss does not stop a staged job, and reconnect reloads the current job snapshot plus subsequent events.
+The browser uploads to the Rust backend, which validates and stores the artifact and creates a durable update job. An authorized operator selects a board and compatible target(s). The ESP downloads the artifact over authenticated HTTPS and updates multiple quadrants sequentially or, when every target is compatible with the same artifact, in one simultaneous shared stream. Browser loss does not stop a staged job, and reconnect reloads the current job snapshot plus subsequent events.
 
 An upload HTTP response means only that the artifact was accepted. The UI separately displays artifact upload, device download, preflight, bootloader entry, page programming, verification, reboot, and health-check progress. Cancellation is permitted before destructive writing; afterward the available actions are finish, retry, or explicitly leave the target recoverable in its bootloader.
 
@@ -316,7 +316,7 @@ Use compile-time board/module targets for quadrant, clock, and relay firmware wh
 - Build and manufacturing-flash the protected bootloader and fuse/lock contract.
 - Implement addressed entry, maintenance quieting, validated artifacts, ESP staging, page programming/readback, persistent recovery markers, and application health confirmation.
 - Add durable backend jobs and structured progress/error events to the SvelteKit interface.
-- Test power loss, ESP reset, network/browser loss, wrong/corrupt artifacts, UART faults, duplicate entry commands, readback mismatch, and sequential four-quadrant update.
+- Test power loss, ESP reset, network/browser loss, wrong/corrupt artifacts, UART faults, duplicate entry commands, readback mismatch, sequential four-quadrant update, and single-responder simultaneous update.
 
 **Exit:** at least 100 repeated updates per target revision succeed with measured retry/failure rates; interruption at every page returns to a remotely programmable bootloader; the UI never reports success before verification and health check; every induced failure has an actionable code, trace, and recovery classification.
 

@@ -55,7 +55,8 @@ the CRC-protected identity and configuration defaults, sets external-crystal/BOD
 EEPROM-preserve fuses, writes the application, and verifies flash plus EEPROM. It
 accepts `--port` and `--bitclock` for programmers that need them.
 
-MiniCore Urboot is installed by default before the application so addressed
+The pinned Arcade Chess Urboot build in `firmware-atmega/bootloader/` is installed
+by default before the application so addressed
 `fw-flash` updates remain available. `--no-bootloader` is a recovery/manufacturing
 escape hatch and disables that update path. Never attempt a plain avrdude serial
 upload with multiple quadrants on the shared UART: they receive the same bytes and
@@ -79,6 +80,9 @@ tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 0 --build
 # Build once, then flash every quadrant in sequence over one connection
 tools/flash-quadrant.py --all --build
 
+# Build once, then program every attached quadrant from the same byte stream
+tools/flash-quadrant.py --simultaneous --build
+
 # Flash an existing image
 tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
     --hex firmware-atmega/.pio/build/ATmega328PB/firmware.hex
@@ -86,15 +90,15 @@ tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
 
 `--port` is auto-detected when exactly one USB serial device is attached. These
 tools are also exposed as PlatformIO project tasks (sidebar: Project Tasks →
-ATmega328PB → Custom): flash all quadrants, flash/provision per quadrant, and the
+ATmega328PB → Custom): simultaneous/sequential flash-all, flash/provision per quadrant, and the
 protocol host tests, e.g. `pio run -d firmware-atmega -e ATmega328PB -t
 flash_all_quadrants`. The ISP fuse/bootloader environments are kept out of this
 list in the separate `firmware-atmega/provisioning/` project.
 
 Close any open serial monitor first; the script owns the port. The full sequence
 per target is: `MAINTENANCE_BEGIN` broadcast (non-targets suppress responses),
-`FW_PREPARE` (CRC-protected EEPROM marker), `FW_ENTER_BOOTLOADER` (watchdog reset
-into Urboot), STK500 sync and page programming with complete readback verification
+`FW_PREPARE` (CRC-protected EEPROM marker), `FW_ENTER_BOOTLOADER` (direct validated
+handoff into Urboot), Urprotocol sync and page programming with complete readback verification
 at the 115200 bootloader baud, `MAINTENANCE_END`, then an `FW_HEALTH` check of the
 rebooted application and an acknowledged `FW_CONFIRM` that marks the image valid.
 Success is only reported after readback, health, and confirmation all pass.
@@ -110,7 +114,11 @@ If flashing fails, the target is left recoverable: Urboot times out back to the
 resident application, and re-running `fw-flash` retries from the top. ISP remains
 the root recovery method. Manual console equivalents (`fw-preflight`, `fw-flash
 <node>`, `fw-abort`, and the low-level `fw-enter`/`fw-end`) are listed under
-`help`. Updates happen one target at a time; repeat the script per node.
+`help`. `fw-flash-all`/`--simultaneous` broadcasts prepare and entry, selects the
+lowest online node as the only Urboot responder, and makes every other attached
+quadrant silently execute the same program/read commands. Each application is
+then health-checked and confirmed separately, so a follower that missed any page
+prevents overall success.
 
 ## Analog diagnostics
 

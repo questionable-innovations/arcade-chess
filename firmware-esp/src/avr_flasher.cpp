@@ -11,7 +11,7 @@ constexpr uint32_t kBusBaud = arcade::kBusBaud;
 // proves unreliable on the diode-OR return at this rate, rebuild urboot slower.
 constexpr uint32_t kBootloaderBaud = 115200;
 // This provisioned urboot u8.0 build encodes its MCU/features in response bytes.
-constexpr uint8_t kUrInSync = 0xa0;
+constexpr uint8_t kUrInSync = 0xe0;
 constexpr uint8_t kUrOk = 0x78;
 constexpr uint8_t kCrcEop = 0x20;
 constexpr uint8_t kUrGetSync = 0x30;
@@ -92,6 +92,20 @@ bool AvrFlasher::start(uint8_t node) {
     Serial.printf("FLASH FAIL node=%u offline\n", node);
     return false;
   }
+  return beginReceive(node, static_cast<uint8_t>(1U << node), false);
+}
+
+bool AvrFlasher::startAll() {
+  if (phase_ != Phase::kIdle || bus_->programmingHandoff()) return false;
+  const uint8_t mask = bus_->onlineMask();
+  if (!mask) return false;
+  uint8_t leader = 0;
+  while (!(mask & (1U << leader))) ++leader;
+  return beginReceive(leader, mask, true);
+}
+
+bool AvrFlasher::beginReceive(uint8_t node, uint8_t target_mask,
+                              bool simultaneous) {
   image_ = static_cast<uint8_t*>(malloc(kAppLimit));
   if (!image_) {
     Serial.println(F("FLASH FAIL no memory for image staging"));
@@ -99,12 +113,16 @@ bool AvrFlasher::start(uint8_t node) {
   }
   memset(image_, 0xff, kAppLimit);
   node_ = node;
+  target_mask_ = target_mask;
+  confirmed_mask_ = 0;
+  simultaneous_ = simultaneous;
   image_size_ = 0;
   ext_base_ = 0;
   eof_seen_ = false;
   phase_ = Phase::kReceiveHex;
   started_ms_ = millis();
-  Serial.printf("HEX-READY node=%u\n", node);
+  if (simultaneous_) Serial.printf("HEX-READY all mask=0x%02x leader=%u\n", target_mask_, node_);
+  else Serial.printf("HEX-READY node=%u\n", node_);
   return true;
 }
 
@@ -182,14 +200,23 @@ bool AvrFlasher::parseHexLine(const char* line) {
 
 void AvrFlasher::finishReceive() {
   if (!image_size_) { fail("empty image"); return; }
+  if (simultaneous_) {
+    target_mask_ = bus_->onlineMask();
+    if (!target_mask_) { fail("no online nodes at handoff"); return; }
+    node_ = 0;
+    while (!(target_mask_ & (1U << node_))) ++node_;
+  }
   image_crc32_ = crc32Update(0, image_, image_size_);
   page_count_ = static_cast<uint16_t>((image_size_ + kPageSize - 1) / kPageSize);
   token_ = nonzeroRandom();
   update_id_ = nonzeroRandom();
   Serial.printf("IMAGE size=%u crc32=0x%08x pages=%u\n", image_size_, image_crc32_,
                 page_count_);
-  if (!bus_->beginFirmwareHandoff(node_, token_, update_id_, image_size_,
-                                  image_crc32_)) {
+  const bool handoff_started = simultaneous_
+      ? bus_->beginFirmwareHandoffAll(node_, target_mask_, token_, update_id_,
+                                      image_size_, image_crc32_)
+      : bus_->beginFirmwareHandoff(node_, token_, update_id_, image_size_, image_crc32_);
+  if (!handoff_started) {
     fail("handoff rejected (bus busy?)");
     return;
   }
@@ -269,7 +296,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
 
     case Phase::kAwaitBoot:
       if (static_cast<int32_t>(now_ms - deadline_ms_) < 0) return;
-      if (!bus_->enqueue(node_, arcade::MessageType::kFwHealth, nullptr, 0)) return;
+      if (!queueNextHealth()) return;
       phase_ = Phase::kHealth;
       deadline_ms_ = now_ms + kHealthResponseTimeoutMs;
       return;
@@ -324,13 +351,30 @@ void AvrFlasher::onFwResponse(uint8_t node, arcade::MessageType type, bool ok,
     deadline_ms_ = millis() + kHealthResponseTimeoutMs;
   } else if (phase_ == Phase::kConfirm && type == arcade::MessageType::kFwConfirm) {
     if (!ok) { fail("confirm rejected"); return; }
-    finishSuccess();
+    confirmed_mask_ |= static_cast<uint8_t>(1U << node_);
+    if ((confirmed_mask_ & target_mask_) == target_mask_) finishSuccess();
+    else {
+      phase_ = Phase::kAwaitBoot;
+      poll_retries_ = 0;
+      deadline_ms_ = millis();
+    }
   }
 }
 
+bool AvrFlasher::queueNextHealth() {
+  for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
+    const uint8_t bit = static_cast<uint8_t>(1U << node);
+    if ((target_mask_ & bit) && !(confirmed_mask_ & bit)) {
+      node_ = node;
+      return bus_->enqueue(node_, arcade::MessageType::kFwHealth, nullptr, 0);
+    }
+  }
+  return false;
+}
+
 void AvrFlasher::finishSuccess() {
-  Serial.printf("FLASH OK node=%u size=%u crc32=0x%08x pages=%u elapsed_ms=%lu\n",
-                node_, image_size_, image_crc32_, page_count_,
+  Serial.printf("FLASH OK nodes=0x%02x size=%u crc32=0x%08x pages=%u elapsed_ms=%lu\n",
+                target_mask_, image_size_, image_crc32_, page_count_,
                 millis() - started_ms_);
   free(image_);
   image_ = nullptr;

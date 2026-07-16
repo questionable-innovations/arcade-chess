@@ -56,7 +56,9 @@ bool BusManager::enqueue(uint8_t node, arcade::MessageType type,
                          const char* correlation) {
   const bool valid_broadcast = node == arcade::kBroadcastAddress &&
       (type == arcade::MessageType::kMaintenanceBegin ||
-       type == arcade::MessageType::kMaintenanceEnd);
+       type == arcade::MessageType::kMaintenanceEnd ||
+       type == arcade::MessageType::kFwPrepare ||
+       type == arcade::MessageType::kFwEnterBootloader);
   if ((!valid_broadcast && node >= arcade::kQuadrantCount) ||
       length > sizeof(queue_[0].payload) || queue_count_ == kQueueCapacity) return false;
   QueuedCommand& q = queue_[queue_head_];

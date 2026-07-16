@@ -28,13 +28,13 @@ def add_protocol_tests() -> None:
 
 if env["PIOENV"] == "ATmega328PB":
     env.AddCustomTarget(
-        name="flash_all_quadrants",
+        name="flash_all_quadrants_simultaneous",
         dependencies="$BUILD_DIR/${PROGNAME}.hex",
         actions=[
-            f'"{TOOLS}/flash-quadrant.py" --all --hex "$BUILD_DIR/${{PROGNAME}}.hex"'
+            f'"{TOOLS}/flash-quadrant.py" --simultaneous --hex "$BUILD_DIR/${{PROGNAME}}.hex"'
         ],
-        title="Flash all quadrants (ESP USB)",
-        description="Build, then program every quadrant in sequence",
+        title="Flash all quadrants simultaneously (ESP USB)",
+        description="Program every attached quadrant from one shared Urprotocol stream",
     )
     for node in range(QUADRANT_COUNT):
         env.AddCustomTarget(

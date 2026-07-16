@@ -13,6 +13,7 @@ hex file with per-line flow control and relays progress.
 Examples:
   tools/flash-quadrant.py --node 0 --build
   tools/flash-quadrant.py --all --build          # every quadrant, sequentially
+  tools/flash-quadrant.py --simultaneous --build # one stream, all quadrants
   tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
       --hex firmware-atmega/.pio/build/ATmega328PB/firmware.hex
 """
@@ -90,10 +91,11 @@ def expect(port: serial.Serial, token: str, timeout_s: float) -> str:
     fatal(f"timed out waiting for '{token}'")
 
 
-def flash_node(port: serial.Serial, node: int, lines: list[str], hex_name: str) -> None:
-    print(f"== quadrant {node} ==")
+def flash_target(port: serial.Serial, command: str, label: str,
+                 lines: list[str], hex_name: str) -> None:
+    print(f"== {label} ==")
     port.reset_input_buffer()
-    port.write(f"fw-flash {node}\n".encode())
+    port.write(f"{command}\n".encode())
     expect(port, "HEX-READY", 5)
 
     print(f"uploading {hex_name}: {len(lines)} records")
@@ -121,6 +123,8 @@ def main() -> None:
                         help="target quadrant node id")
     target.add_argument("--all", action="store_true",
                         help="flash quadrants 0..3 in sequence over one connection")
+    target.add_argument("--simultaneous", action="store_true",
+                        help="flash every attached quadrant from one shared stream")
     parser.add_argument("--hex", type=pathlib.Path,
                         help="Intel HEX image (default: PlatformIO build output)")
     parser.add_argument("--env", default=DEFAULT_ENV,
@@ -139,13 +143,20 @@ def main() -> None:
     if not lines or not all(l.startswith(":") for l in lines):
         fatal(f"{hex_path} is not an Intel HEX file")
 
-    nodes = range(QUADRANT_COUNT) if args.all else [args.node]
     with serial.Serial(args.port or detect_port(), 115200, timeout=0.1) as port:
         time.sleep(0.3)
-        for node in nodes:
-            flash_node(port, node, lines, hex_path.name)
+        if args.simultaneous:
+            flash_target(port, "fw-flash-all", "all attached quadrants",
+                         lines, hex_path.name)
+        else:
+            nodes = range(QUADRANT_COUNT) if args.all else [args.node]
+            for node in nodes:
+                flash_target(port, f"fw-flash {node}", f"quadrant {node}",
+                             lines, hex_path.name)
     if args.all:
         print(f"all {QUADRANT_COUNT} quadrants flashed")
+    elif args.simultaneous:
+        print("all attached quadrants flashed simultaneously")
 
 
 if __name__ == "__main__":

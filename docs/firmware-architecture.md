@@ -35,7 +35,7 @@ keeps their top-level scheduling visible in one place:
 | `Sensors` | Mux/ADC scanning, filtering, classification, calibration, event queue, averaged raw capture |
 | `Lighting` | Independent FastLED surfaces for settled pieces, overrides, identify, and board-wide animations |
 | `ProtocolService` | COBS stream parsing, request dispatch, configuration, snapshots and event responses |
-| `FirmwareUpdate` | Maintenance leases, preflight, update marker, bootloader-entry validation and watchdog reset |
+| `FirmwareUpdate` | Maintenance leases, preflight, update marker, and validated direct bootloader handoff |
 | `Diagnostics` | Isolated ASCII/CSV diagnostic presentation |
 | `system_info` | Early reset-cause capture, AVCC measurement, fuse and bootloader inspection |
 | `persistent` | Identity, configuration, calibration and alternating OTA marker slots |

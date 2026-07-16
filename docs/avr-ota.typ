@@ -10,9 +10,10 @@
 )[
   *Current implementation boundary.* Framed preflight, maintenance lease,
   two-phase token validation, alternating CRC-protected EEPROM markers,
-  ACK-and-drain, LED shutdown, watchdog reset, ESP bus handoff, the ESP page
-  programmer with full page readback verification, Intel HEX validation, and the
-  health/confirm exchange are implemented. Bootloader-side marker handling, the
+  ACK-and-drain, LED shutdown, direct protected-boot handoff, single-responder
+  simultaneous programming, ESP bus handoff, the ESP page programmer with full
+  page readback verification, Intel HEX validation, and the health/confirm exchange
+  are implemented. Bootloader-side marker handling, the
   signed artifact manifest, and the remote job lifecycle remain.
 ]
 
@@ -31,9 +32,9 @@
 This is a required product capability, not a late manufacturing convenience. A
 protected resident bootloader is installed during the initial ISP flash together
 with fuses, lock bits, quadrant identity, and the first application image. Later
-updates use a normal addressed application command, a software reset into the
-bootloader, and a temporary point-to-point programming session controlled by the
-ESP32.
+updates use a normal addressed application command or coordinated all-node
+broadcast, an explicit application-to-bootloader handoff, and a temporary raw
+programming session controlled by the ESP32.
 
 == Proven reference and changes for Arcade Chess
 
@@ -51,9 +52,11 @@ not copy several prototype shortcuts:
 
 - A single byte such as `F` is unsafe on a multi-drop production protocol. Entry is
   an addressed, CRC-protected, two-phase command with a one-time token.
-- Jumping from the UART ISR with a hard-coded address leaves interrupt, stack, and
-  peripheral state ambiguous. The application records an update request and uses
-  a watchdog software reset; the reset path and linker own the bootloader address.
+- Jumping from the UART ISR leaves interrupt, stack, and peripheral state ambiguous.
+  The application records an update request and defers entry until after its ACK
+  drains. The shared handoff function disables interrupts, resets the stack, and
+  transfers to the protected boot section; the matching Urboot fork validates and
+  clears its one-shot SRAM record.
 - The reference HEX parser extracts line data without fully honoring record
   addresses, record types, checksums, gaps, or boot-section bounds. Arcade Chess
   normalizes and validates the artifact before it reaches programming mode.
@@ -121,10 +124,13 @@ The normal framed protocol gains these messages:
     app version, flash limits, reset cause, supply/health status, and update policy.],
   [`MAINTENANCE_BEGIN`], [Broadcast a no-response bus-quiet lease naming the target,
     update ID, start time, and maximum duration.],
-  [`FW_PREPARE`], [Addressed image metadata and one-time entry token. The target
-    validates compatibility and persists the update marker.],
-  [`FW_ENTER_BOOTLOADER`], [Commit the prepared token. The target ACKs, drains TX,
-    makes outputs safe, and causes a watchdog reset.],
+  [`FW_PREPARE`], [Addressed image metadata and one-time entry token, or a
+    no-response broadcast during all-node maintenance. Each participant validates
+    compatibility and persists its update marker.],
+  [`FW_ENTER_BOOTLOADER`], [Commit the prepared token. The addressed form ACKs;
+    the all-node form names one response leader and freezes a target mask.
+    Participants drain TX as needed, make outputs safe, and use the explicit
+    bootloader handoff.],
   [`MAINTENANCE_END`], [Broadcast the result and return all non-target nodes to
     normal framed traffic. Expiry also restores them if the ESP resets.],
   [`FW_HEALTH`], [Application boot confirmation containing new build identity,
@@ -133,8 +139,9 @@ The normal framed protocol gains these messages:
     marks itself valid and ACKs; only this permits job success.],
 )
 
-The target never enters on malformed, broadcast, duplicated, stale, or wrong-ID
-commands. Bootloader entry cannot be requested while a relay output is armed, the
+The target never enters on malformed, stale, or wrong-token commands. Broadcast
+entry is accepted only inside an all-node maintenance lease and includes a valid
+leader ID. Bootloader entry cannot be requested while a relay output is armed, the
 target has an incompatible hardware revision, the artifact is absent from ESP
 storage, or another maintenance job is active.
 
@@ -145,10 +152,9 @@ set an overflow flag that triggers a later snapshot.
 
 == Bootloader programming session
 
-After the target ACK and watchdog reset, the ESP exclusively owns the UART and
-changes from framed Arcade Chess traffic to the bootloader protocol. The initial
-implementation may use the proven STK500v1-style command subset, provided its exact
-behavior is captured in tests.
+After entry, the ESP exclusively owns the UART and changes from framed Arcade Chess
+traffic to Urprotocol. For an all-node update, every bootloader executes the same
+commands but only the selected leader transmits; the other TX paths remain idle.
 
 1. Synchronize and read bootloader/device identity.
 2. Confirm target signature, flash geometry, boot bounds, and update ID.
@@ -207,8 +213,9 @@ The browser does not keep the programming operation alive. Its workflow is:
 4. Backend creates a durable update job and asks the ESP to download the artifact
    over authenticated HTTPS.
 5. ESP validates and stages the full artifact locally before disturbing the UART.
-6. ESP updates targets one at a time. A four-quadrant update is four child jobs,
-   never a broadcast flash.
+6. ESP either updates targets one at a time or uses the simultaneous all-node mode
+   for identical compatible quadrants. The latter has one programming/readback
+   stream followed by separate health and confirmation checks for every node.
 7. Backend records structured progress events and fans them to every viewer.
 8. A reconnecting browser loads the current job snapshot, then resumes the event
    stream from its last sequence.
@@ -331,8 +338,9 @@ message; dashboards aggregate by the code, never by the message.
   state reconciliation.
 - Inject UART corruption, timeout, duplicate response, and slow rising edges while
   retaining actionable traces and counters.
-- Update each quadrant alone and all four sequentially while non-target nodes remain
-  electrically quiet, keep local effects smooth, and recover their state snapshots.
+- Update each quadrant alone, all four sequentially, and all four simultaneously.
+  Scope the return line to prove only the selected leader drives it, then prove a
+  deliberately disconnected follower fails the post-flash health/CRC gate.
 - Corrupt a programmed page and prove readback prevents success.
 - Run at least 100 repeated update cycles per target/hardware revision and track
   duration, retries, and failure rates.

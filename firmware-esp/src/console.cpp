@@ -20,6 +20,7 @@ void Console::printHelp() const {
     "  config <node> <key> <value> | wifi <ssid> <password>\n"
     "  fw-preflight <node>\n"
     "  fw-flash <node> (then stream Intel HEX; see tools/flash-quadrant.py)\n"
+    "  fw-flash-all (one shared stream; lowest online node responds)\n"
     "  fw-abort | fw-enter <node> <token> <size> <crc32> <update-id> | fw-end <token>\n"
     "  device-id <id> | token <bearer-token> | reboot\n"
     "Config keys: 1 enter, 2 exit, 3 debounce, 4 settle_us, 5 scan_ms,\n"
@@ -118,6 +119,9 @@ void Console::execute(char* line) {
     if (!node) Serial.println(F("usage: fw-flash <node>"));
     else if (!flasher_->start(strtoul(node, nullptr, 0)))
       Serial.println(F("fw-flash rejected (busy, offline, or bad node)"));
+  } else if (!strcmp(command, "fw-flash-all")) {
+    if (!flasher_->startAll())
+      Serial.println(F("fw-flash-all rejected (busy or no online nodes)"));
   } else if (!strcmp(command, "fw-abort")) {
     flasher_->abort("user abort");
   } else if (!strcmp(command, "fw-enter")) {

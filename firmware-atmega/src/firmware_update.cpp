@@ -1,8 +1,8 @@
 #include "firmware_update.h"
 
 #include <avr/pgmspace.h>
-#include <avr/wdt.h>
 
+#include "bootloader_handoff.h"
 #include "system_info.h"
 
 namespace quadrant {
@@ -29,6 +29,9 @@ constexpr uint8_t kPrepareUpdateIdOffset = 4;
 constexpr uint8_t kPrepareImageSizeOffset = 8;
 constexpr uint8_t kPrepareImageCrcOffset = 12;
 constexpr uint8_t kEnterBootloaderBytes = 8;
+constexpr uint8_t kBroadcastEnterBootloaderBytes = 10;
+constexpr uint8_t kBroadcastLeaderOffset = 8;
+constexpr uint8_t kBroadcastTargetMaskOffset = 9;
 constexpr uint8_t kHandoffProtocolVersion = 1;
 constexpr uint8_t kHealthBytes = 14;
 constexpr uint8_t kHealthStateOffset = 0;
@@ -78,8 +81,47 @@ bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
     maintenance_token_ = arcade::getU32(request.payload + kMaintenanceTokenOffset);
     maintenance_until_ms_ = millis() +
         arcade::getU16(request.payload + kMaintenanceLeaseOffset);
-    maintenance_active_ = maintenance_target_ < arcade::kQuadrantCount &&
+    maintenance_active_ = (maintenance_target_ < arcade::kQuadrantCount ||
+                           maintenance_target_ == arcade::kBroadcastAddress) &&
                           maintenance_token_ != 0;
+    return true;
+  }
+  if (request.type == arcade::MessageType::kFwPrepare &&
+      request.payload_length == kPrepareBytes && maintenance_active_ &&
+      maintenance_target_ == arcade::kBroadcastAddress) {
+    const uint32_t token = arcade::getU32(request.payload + kPrepareTokenOffset);
+    const uint32_t image_size =
+        arcade::getU32(request.payload + kPrepareImageSizeOffset);
+    if (!system_info::residentBootloaderEnabled() || !token ||
+        token != maintenance_token_ || !image_size ||
+        image_size > arcade::kAvrApplicationLimit || sensors_.calibrating() ||
+        sensors_.rawCaptureBusy()) return true;
+    marker_.state = UpdateState::kRequested;
+    marker_.node_id = identity_.node_id;
+    marker_.token = token;
+    marker_.update_id = arcade::getU32(request.payload + kPrepareUpdateIdOffset);
+    marker_.image_size = image_size;
+    marker_.image_crc32 = arcade::getU32(request.payload + kPrepareImageCrcOffset);
+    saveUpdateMarker(marker_);
+    return true;
+  }
+  if (request.type == arcade::MessageType::kFwEnterBootloader &&
+      request.payload_length == kBroadcastEnterBootloaderBytes &&
+      maintenance_active_ && maintenance_target_ == arcade::kBroadcastAddress) {
+    const uint8_t target_mask = request.payload[kBroadcastTargetMaskOffset];
+    const uint8_t leader = request.payload[kBroadcastLeaderOffset];
+    if (leader >= arcade::kQuadrantCount || !(target_mask & (1U << leader)))
+      return true;
+    if (!(target_mask & (1U << identity_.node_id))) return true;
+    const uint32_t token = arcade::getU32(request.payload);
+    const uint32_t update_id =
+        arcade::getU32(request.payload + kPrepareUpdateIdOffset);
+    if (marker_.state != UpdateState::kRequested || marker_.token != token ||
+        marker_.update_id != update_id || token != maintenance_token_) return true;
+    marker_.state = UpdateState::kProgramming;
+    saveUpdateMarker(marker_);
+    bootloader_responder_ = leader == identity_.node_id;
+    reset_pending_ = true;
     return true;
   }
   if (request.type == arcade::MessageType::kMaintenanceEnd &&
@@ -200,11 +242,7 @@ void FirmwareUpdate::tick(uint32_t now_ms) {
   lighting_.shutdownNow();
   Serial.flush();
   cli();
-  // Urboot enters programming mode only when EXTRF is set; the flag survives
-  // the watchdog reset, so the bootloader services this handoff.
-  MCUSR = _BV(EXTRF);
-  wdt_enable(WDTO_15MS);
-  while (true) {}
+  enterBootloader(bootloader_responder_);
 }
 
 }  // namespace quadrant

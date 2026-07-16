@@ -110,12 +110,12 @@ rejected, or timed-out state after ESP-side validation and the actual bus respon
 
 == Bootloader mode
 
-Firmware update begins in the framed protocol and is always addressed to one node.
-After preflight, the ESP broadcasts a no-response maintenance lease so non-target
-nodes ignore the temporary raw programmer stream. The target persists an update
-marker, ACKs `FW_ENTER_BOOTLOADER`, drains its UART, makes outputs safe, and uses a
-watchdog software reset into the protected bootloader. Only then does the ESP switch
-the bus to the tested STK500-compatible programming subset.
+Firmware update begins in the framed protocol. A single-node update is addressed;
+a simultaneous update broadcasts prepare and entry after selecting one online node
+as response leader. Every participant persists an update marker and enters the
+protected bootloader through its explicit SRAM handoff. Silent followers consume
+and execute the same Urprotocol commands but never drive TX. Only the leader replies
+to the ESP, avoiding return-line collisions.
 
 Normal framed traffic resumes after readback verification and application reboot.
 Success additionally requires matching `FW_HEALTH`, then `FW_CONFIRM` and its ACK

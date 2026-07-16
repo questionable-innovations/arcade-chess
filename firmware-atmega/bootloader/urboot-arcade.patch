@@ -1,0 +1,63 @@
+diff --git a/src/urboot.c b/src/urboot.c
+index b914409..4130bd8 100644
+--- a/src/urboot.c
++++ b/src/urboot.c
+@@ -315,6 +315,16 @@
+ #include "pin_defs.h"           // Definitions for LEDs and REG names (include after urboot_ioregs.h)
+ #include "errata.h"
+ 
++/* Arcade Chess serial-only application handoff.  This record is consumed
++ * before the first call can reuse the top of the stack.  Silent participants
++ * still receive and execute every programming command but never drive TX. */
++#define ARCADE_HANDOFF_ADDRESS (RAMEND - 5)
++#define ARCADE_HANDOFF_MAGIC0  0x41
++#define ARCADE_HANDOFF_MAGIC1  0x43
++#define ARCADE_HANDOFF_MAGIC2  0x42
++#define ARCADE_HANDOFF_MAGIC3  0x4c
++register uint8_t arcade_silent asm("r3");
++
+ #ifndef UARTNUM                 // Default UART to 0
+ #define UARTNUM 0
+ #endif
+@@ -1729,6 +1739,18 @@ int main(void) {
+   SP = RAMEND;
+ #endif
+ 
++  volatile uint8_t *arcade_handoff = (volatile uint8_t *) ARCADE_HANDOFF_ADDRESS;
++  const uint8_t arcade_entry = arcade_handoff[0] == ARCADE_HANDOFF_MAGIC0 &&
++                               arcade_handoff[1] == ARCADE_HANDOFF_MAGIC1 &&
++                               arcade_handoff[2] == ARCADE_HANDOFF_MAGIC2 &&
++                               arcade_handoff[3] == ARCADE_HANDOFF_MAGIC3;
++  arcade_silent = arcade_entry && !arcade_handoff[4];
++  arcade_handoff[0] = 0;
++  arcade_handoff[1] = 0;
++  arcade_handoff[2] = 0;
++  arcade_handoff[3] = 0;
++  arcade_handoff[4] = 0;
++
+   // Copy reset flags and clear them
+   asm volatile("zap_mcusr: "
+     "in r2, %[mcusr]\n"
+@@ -1742,9 +1764,10 @@ int main(void) {
+   // Unless there was an external reset jump to application
+ #if !DUAL && !(defined(__AVR_ERRATA_SKIP_JMP_CALL__) && __AVR_ERRATA_SKIP_JMP_CALL__ && \
+   !FLASHin8k && !FLASHWRAPS)
+-  // Skip next instruction if EXTRF set (compiler doesn't know length of asm is one instruction)
+-  asm volatile("sbrs %[ms], %[extrf]\n" :: [ms] "r"(mcusr), [extrf] "I"(EXTRF));
+-  jmpToAppOpcode();
++  if(!arcade_entry && !(mcusr & _BV(EXTRF))) {
++    jmpToAppOpcode();
++    __builtin_unreachable ();
++  }
+ #else
+ 
+   if(!(mcusr & _BV(EXTRF))) {
+@@ -2164,6 +2187,8 @@ int main(void) {
+ 
+ 
+ void putch(char chr) {
++  if(arcade_silent)
++    return;
+   asm volatile(
+ #if !SWIO
+ 

@@ -223,11 +223,12 @@ authentication and software are not safety barriers.
 = ATmega firmware updates
 
 Every ATmega must be updateable by the ESP32 over only the shared UART lines. The
-application accepts an addressed, CRC-protected maintenance command, persists a
-one-time update request, ACKs it, and uses a watchdog software reset into a
-protected resident bootloader. The ESP quiets the other nodes, programs exactly one
-target, reads the application back, restores the framed protocol, and confirms the
-new application's self-test before declaring success.
+application accepts an addressed or coordinated all-node CRC-protected maintenance
+command, persists a one-time update request, drains any ACK, and enters the protected
+resident bootloader through an explicit one-shot handoff. The ESP can program one
+target or make a selected set consume one shared stream while only one leader
+responds. It restores the framed protocol and confirms each new application's CRC
+and self-test before declaring success.
 
 The website starts the same operation through a durable backend job. Firmware is
 validated and fully staged on the ESP before the bus enters maintenance, so loss of

@@ -12,6 +12,7 @@ class AvrFlasher {
  public:
   void begin(BusManager& bus, HardwareSerial& bus_serial);
   bool start(uint8_t node);
+  bool startAll();
   void abort(const char* reason);
   bool active() const { return phase_ != Phase::kIdle; }
   bool receiving() const { return phase_ == Phase::kReceiveHex; }
@@ -39,6 +40,8 @@ class AvrFlasher {
   void fail(const char* reason);
   void finishSuccess();
   void restoreBusBaud();
+  bool beginReceive(uint8_t node, uint8_t target_mask, bool simultaneous);
+  bool queueNextHealth();
 
   bool urCommand(const uint8_t* request, size_t request_length,
                  uint8_t* response, size_t response_length, uint32_t timeout_ms);
@@ -51,6 +54,9 @@ class AvrFlasher {
   HardwareSerial* serial_ = nullptr;
   Phase phase_ = Phase::kIdle;
   uint8_t node_ = 0;
+  uint8_t target_mask_ = 0;
+  uint8_t confirmed_mask_ = 0;
+  bool simultaneous_ = false;
   uint8_t* image_ = nullptr;
   uint32_t image_size_ = 0;
   uint32_t image_crc32_ = 0;

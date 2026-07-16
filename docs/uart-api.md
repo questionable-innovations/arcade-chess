@@ -38,9 +38,9 @@ LED refresh rate.
 | `0x44` | `RENDER_WINDOW` | broadcast, empty | no response; all quadrants render concurrently and ESP keeps the bus quiet for 4 ms |
 | `0x50` | `SET_DEBUG` | `flags, raw_interval_ms:u16` | effective values |
 | `0x60` | `FW_PREFLIGHT` | empty | `node, high_fuse, bootloader_enabled, handoff_version, page_size:u16, flash_size:u32, app_limit:u32, marker_state, reset_cause, supply_mv:u16` |
-| `0x61` | `MAINTENANCE_BEGIN` | broadcast: `target, token:u32, lease_ms:u16` | no response; non-target nodes suppress responses |
-| `0x62` | `FW_PREPARE` | `token:u32, update_id:u32, image_size:u32, image_crc32:u32` | echoed `token, update_id`; metadata is persisted before ACK |
-| `0x63` | `FW_ENTER_BOOTLOADER` | `token:u32, update_id:u32` | echoed values, followed by TX drain, LED shutdown, and watchdog reset |
+| `0x61` | `MAINTENANCE_BEGIN` | broadcast: `target, token:u32, lease_ms:u16`; target `0xFF` means all | no response; non-target nodes suppress responses |
+| `0x62` | `FW_PREPARE` | addressed or all-node broadcast: `token:u32, update_id:u32, image_size:u32, image_crc32:u32` | addressed form echoes `token, update_id`; metadata is persisted before ACK/no-response continuation |
+| `0x63` | `FW_ENTER_BOOTLOADER` | addressed: `token:u32, update_id:u32`; all-node broadcast appends `leader, target_mask` | addressed form echoes values; then LED shutdown and direct protected-boot handoff |
 | `0x64` | `MAINTENANCE_END` | broadcast: `token:u32` | no response; normal framed traffic resumes |
 | `0x65` | `FW_HEALTH` | empty | `marker_state, reset_cause, uptime_ms:u32, update_id:u32, image_crc32:u32` |
 | `0x66` | `FW_CONFIRM` | `update_id:u32` | `update_id:u32, marker_state`; requires a candidate/valid marker with matching ID |
@@ -103,16 +103,27 @@ calibration/raw capture is idle. It writes a generation-numbered, CRC-protected
 marker to alternating EEPROM slots at addresses 128 and 160.
 
 `FW_ENTER_BOOTLOADER` must repeat the token and update ID. The node advances the
-marker to `programming`, ACKs and physically drains UART, turns every LED chain
-off, then uses a 15 ms watchdog reset. It never jumps to a literal flash address;
-the boot-reset fuse and resident bootloader own reset dispatch.
+marker to `programming`, ACKs and physically drains UART for the addressed form,
+turns every LED chain off, writes the five-byte SRAM handoff, resets the stack,
+and jumps to the protected hardware boot section. The custom Urboot consumes and
+clears that handoff before its first call. This is necessary because AVR software
+cannot set `EXTRF`; a watchdog reset only supplies `WDRF`, which stock Urboot treats
+as an ordinary application boot.
 
 After the entry ACK the ESP stops framed traffic, switches its bus UART to the
-bootloader baud, and speaks STK500v1 to Urboot: sync, 128-byte page writes with
+bootloader baud, and speaks Urprotocol to Urboot: sync, 128-byte page writes with
 bounded retries, then complete page readback verification. It then restores the
 bus baud and broadcasts `MAINTENANCE_END`. Non-target applications ignore
 programmer traffic during the 60-second maintenance lease and recover
 automatically when it expires.
+
+For simultaneous flashing, `MAINTENANCE_BEGIN` names target `0xFF`, then
+`FW_PREPARE` and the ten-byte `FW_ENTER_BOOTLOADER` are broadcasts. The appended
+leader is the lowest online node and `target_mask` freezes the participant set.
+All selected quadrants execute every raw command;
+only the leader's bootloader transmits. Leader readback verifies the shared stream,
+then individual application CRC/health checks prove that every expected follower
+also received the complete image.
 
 Marker states are `0` none, `1` requested, `2` programming, `3` candidate, and
 `4` valid. An application that boots with a `programming` marker promotes it to
