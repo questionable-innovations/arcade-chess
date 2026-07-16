@@ -12,16 +12,28 @@
 // Create a new instance of the MD_Parola class with hardware SPI connection
 MD_Parola myDisplay = MD_Parola(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
 
+// Timer variables
 unsigned long timeLeft;
 unsigned long lastTick;
 unsigned long lastShownSec;
 
+// Stopwatch variables
+unsigned long stopwatchElapsed;
+unsigned long stopwatchLastTick;
+unsigned long stopwatchLastShownSec;
+
+// Start timer with a specified duration (in ms)
 void startTimer(unsigned long startMs) {
   timeLeft = startMs;
   lastTick = millis();
   lastShownSec = ~0UL; // force first render
 }
 
+void startStopwatch() {
+  stopwatchElapsed = 0;
+  stopwatchLastTick = millis();
+  stopwatchLastShownSec = ~0UL; // force first render
+}
 
 void renderText(
   const char* text,
@@ -40,15 +52,40 @@ void renderText(
   }
 }
 
+void updateStopwatch() {
+  unsigned long now = millis();
+  stopwatchElapsed += now - stopwatchLastTick;
+  stopwatchLastTick = now;
+
+  unsigned long sec = stopwatchElapsed / 1000;
+  if (sec == stopwatchLastShownSec) return; // only re-render on change, avoid flicker
+  stopwatchLastShownSec = sec;
+
+  char buf[6];  // MM:SS\0
+  snprintf(buf, sizeof(buf), "%02lu:%02lu", sec / 60, sec % 60);
+  renderText(buf, PA_CENTER, PA_PRINT);
+}
+
+// Pump the display to update animations
 void pumpDisplay() {
   if (myDisplay.displayAnimate()) {
     myDisplay.displayReset();
   }
 }
 
+// Hold for a specified duration (in ms)
 void holdFor(unsigned long ms) {
   unsigned long start = millis();
   while (millis() - start < ms) {
+    pumpDisplay();
+  }
+}
+
+void runStopwatchFor(unsigned long ms) {
+  startStopwatch();
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    updateStopwatch();
     pumpDisplay();
   }
 }
@@ -84,6 +121,9 @@ void setup() {
 
   // Set the intensity (brightness) of the display (0-15)
   myDisplay.setIntensity(8);
+
+  // TESTS BELOW
+  runStopwatchFor(5000);
 
   renderText("Welcome to Arcade Chess!", PA_CENTER, PA_SCROLL_LEFT, 50);
   holdFor(6000);
