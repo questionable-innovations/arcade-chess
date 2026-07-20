@@ -46,14 +46,23 @@ ISP header. Confirm 5 V, the external 16 MHz crystal, and header orientation.
 # Dry run: builds and describes the target without writing it
 tools/provision-quadrant.sh --id 0
 
-# Program and verify using USBasp
+# Auto-select USBasp when attached, otherwise Arduino as ISP
+tools/provision-quadrant.sh --id 0 --yes
+
+# Explicit alternatives
 tools/provision-quadrant.sh --id 0 --programmer usbasp --yes
+tools/provision-quadrant.sh --id 0 --programmer arduino-as-isp \
+    --port /dev/cu.usbserial-1130 --yes
 ```
 
 Repeat with IDs 1, 2, and 3. The tool generates a complete EEPROM image containing
 the CRC-protected identity and configuration defaults, sets external-crystal/BOD/
 EEPROM-preserve fuses, writes the application, and verifies flash plus EEPROM. It
-accepts `--port` and `--bitclock` for programmers that need them.
+accepts `--port` and `--bitclock` for programmers that need them. Auto-selection
+prefers an enumerated USBasp; otherwise it requires exactly one USB modem/serial
+port and uses the standard ArduinoISP sketch protocol at 19,200 baud. Pass
+`--port` when multiple serial devices are present. The Arduino running ArduinoISP
+should have its usual reset-disable capacitor fitted when required by that board.
 
 The pinned Arcade Chess Urboot build in `firmware-atmega/bootloader/` is installed
 by default before the application so addressed
