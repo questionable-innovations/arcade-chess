@@ -36,6 +36,9 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     welcomed_ = true;
     next_status_ms_ = millis();
     publishSnapshot();
+    for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
+      publishNodeStatus(node);
+    }
     return;
   }
   if (strcmp(message_type, "command") != 0 || !welcomed_) return;
@@ -102,12 +105,32 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
     accepted = bus_->identify(node, args["duration_ms"] | kDefaultIdentifyMs, id);
   } else if (!strcmp(name, "lighting.set")) {
+    if (!args["squares"].is<JsonArrayConst>()) {
+      sendResult(id, "rejected", "invalid_args"); return;
+    }
     uint8_t squares[arcade::kBoardSquareCount]; size_t count = 0;
-    for (JsonVariant square : args["squares"].as<JsonArray>())
-      if (count < arcade::kBoardSquareCount) squares[count++] = square.as<uint8_t>();
+    bool has_online_target = false;
+    for (JsonVariantConst square : args["squares"].as<JsonArrayConst>()) {
+      if (!square.is<uint8_t>() || square.as<uint8_t>() >= arcade::kBoardSquareCount) {
+        sendResult(id, "rejected", "invalid_args"); return;
+      }
+      if (count >= arcade::kBoardSquareCount) {
+        sendResult(id, "rejected", "invalid_args"); return;
+      }
+      squares[count++] = square.as<uint8_t>();
+      uint8_t node = 0, local = 0;
+      if (bus_->locateGlobal(squares[count - 1], node, local) && bus_->isOnline(node)) {
+        has_online_target = true;
+      }
+    }
+    if (!count) { sendResult(id, "rejected", "invalid_args"); return; }
+    if (!has_online_target) {
+      sendResult(id, "rejected", "target_node_offline"); return;
+    }
     const uint32_t colour = strtoul(args["colour"] | "000000", nullptr, 16);
     accepted = bus_->setGlobalSquares(squares, count, colour >> 16, colour >> 8, colour,
                                       args["duration_ms"] | 0, id);
+    if (!accepted) { sendResult(id, "rejected", "bus_queue_full"); return; }
   } else if (!strcmp(name, "device.restart") &&
              !strcmp(args["confirm"] | "", "restart")) {
     sendResult(id, "accepted"); delay(kRestartFlushMs); ESP.restart();

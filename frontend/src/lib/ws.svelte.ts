@@ -49,6 +49,21 @@ function rebuildSquares(dev: DeviceState, d: EventData): void {
 	}
 }
 
+function rebuildNodes(dev: DeviceState, env: Envelope, d: EventData): void {
+	for (const summary of d.nodes ?? []) {
+		if (!Number.isInteger(summary.node) || summary.node < 0 || summary.node >= 4) continue;
+		dev.node_status[summary.node] = {
+			v: env.v,
+			type: 'node.status',
+			device_id: env.device_id,
+			boot_id: env.boot_id,
+			seq: env.seq,
+			at_ms: env.at_ms,
+			data: { ...summary }
+		};
+	}
+}
+
 // Rebuild device state from one relayed event, honouring (boot_id, seq) continuity:
 // snapshots supersede everything; a seq gap freezes sensor.changed until the next snapshot.
 function applyEvent(dev: DeviceState, env: Envelope): void {
@@ -72,6 +87,7 @@ function applyEvent(dev: DeviceState, env: Envelope): void {
 		if (boot !== dev.bootId || seq >= dev.seq) {
 			dev.snapshot = env;
 			rebuildSquares(dev, d);
+			rebuildNodes(dev, env, d);
 			dev.bootId = boot;
 			dev.seq = seq;
 			dev.gap = false;

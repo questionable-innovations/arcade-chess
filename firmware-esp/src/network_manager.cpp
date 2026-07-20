@@ -57,8 +57,10 @@ void NetworkManager::tick(uint32_t now_ms) {
     JsonDocument doc;
     doc["v"] = 1; doc["type"] = "device.status"; doc["device_id"] = config_->device_id;
     doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-    doc["at_ms"] = now_ms; doc["data"]["wifi_rssi"] = WiFi.RSSI();
-    doc["data"]["free_heap"] = ESP.getFreeHeap();
+    doc["at_ms"] = now_ms; doc["data"]["rssi"] = WiFi.RSSI();
+    doc["data"]["heap"] = ESP.getFreeHeap();
+    doc["data"]["uptime"] = now_ms;
+    doc["data"]["websocket_reconnects"] = reconnects_;
     doc["data"]["uart_good"] = bus_->goodFrames();
     doc["data"]["uart_bad"] = bus_->badFrames();
     doc["data"]["uart_timeouts"] = bus_->timeoutCount();
@@ -130,6 +132,26 @@ void NetworkManager::publishSensor(uint8_t square, arcade::SensorState state,
   doc["data"]["state"] = stateName(state); doc["data"]["raw"] = raw;
   doc["data"]["node"] = node; doc["data"]["local_square"] = local;
   doc["data"]["baseline"] = bus_->node(node).baseline[local];
+  String json; serializeJson(doc, json); sendJson(json);
+}
+
+void NetworkManager::publishNodeStatus(uint8_t node) {
+  if (!welcomed_ || node >= arcade::kQuadrantCount) return;
+  const QuadrantState& q = bus_->node(node);
+  JsonDocument doc;
+  doc["v"] = 1; doc["type"] = "node.status"; doc["device_id"] = config_->device_id;
+  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
+  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  data["node"] = node; data["online"] = q.online; data["calibrated"] = q.calibrated;
+  data["reset_cause"] = q.reset_cause; data["timeouts"] = q.timeouts;
+  data["consecutive_timeouts"] = q.consecutive_timeouts;
+  data["last_seen_ms"] = q.last_seen_ms;
+  if (q.fw_known) {
+    char firmware[16];
+    snprintf(firmware, sizeof(firmware), "%u.%u.%u",
+             q.fw_version[0], q.fw_version[1], q.fw_version[2]);
+    data["firmware"] = firmware;
+  }
   String json; serializeJson(doc, json); sendJson(json);
 }
 

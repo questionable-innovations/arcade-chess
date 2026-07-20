@@ -48,7 +48,12 @@ void commandComplete(const char* id, bool ok, const char* reason) {
 void nodePresenceChanged(uint8_t node, bool online) {
   Serial.printf("node presence: node=%u online=%u mask=0x%02x\n",
                 node, online, bus.onlineMask());
+  network.publishNodeStatus(node);
   network.publishSnapshot();
+}
+
+void nodeStatusChanged(uint8_t node) {
+  network.publishNodeStatus(node);
 }
 
 void fwResponse(uint8_t node, arcade::MessageType type, bool ok,
@@ -73,6 +78,7 @@ void setup() {
   callbacks.rawScanReady = rawScanReady;
   callbacks.commandComplete = commandComplete;
   callbacks.nodePresenceChanged = nodePresenceChanged;
+  callbacks.nodeStatusChanged = nodeStatusChanged;
   callbacks.fwResponse = fwResponse;
   bus.begin(Serial2, callbacks);
   flasher.begin(bus, Serial2);

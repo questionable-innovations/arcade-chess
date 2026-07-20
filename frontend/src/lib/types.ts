@@ -3,6 +3,15 @@
 
 export type SquareState = 'empty' | 'positive' | 'negative' | 'uncertain';
 
+export interface NodeSummary {
+	node: number;
+	online: boolean;
+	calibrated?: boolean;
+	firmware?: string;
+	reset_cause?: string | number;
+	timeouts?: number;
+}
+
 // Loose superset of every device-event `data` payload we read.
 export interface EventData {
 	square?: number;
@@ -13,13 +22,16 @@ export interface EventData {
 	local_square?: number;
 	squares?: number[];
 	valid?: boolean[];
+	nodes?: NodeSummary[];
 	online?: boolean;
 	calibrated?: boolean;
 	firmware?: string;
-	reset_cause?: string;
+	reset_cause?: string | number;
 	rssi?: number;
 	heap?: number;
 	uptime?: number;
+	wifi_rssi?: number;
+	free_heap?: number;
 	level?: string;
 	component?: string;
 	message?: string;
