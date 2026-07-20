@@ -18,7 +18,7 @@ validation later.
   `unix_ms`. The ESP does not claim wall-clock validity until time is synchronized.
 - Unknown object fields must be ignored. Unknown `type` values must be logged and
   ignored. A different major `v` is incompatible.
-- The maximum accepted inbound JSON message is 2048 bytes. The server should keep
+- The maximum accepted device-to-server JSON message is 4096 bytes. The server should keep
   commands below 1024 bytes for the initial ESP implementation.
 
 ## Session handshake

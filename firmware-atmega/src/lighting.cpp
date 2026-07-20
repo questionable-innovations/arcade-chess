@@ -34,8 +34,8 @@ void Lighting::setSquare(uint8_t square, const CRGB& value) {
 void Lighting::render(uint32_t now_ms) {
   fill_solid(primary_, bringup::kSquareStripPixels, CRGB::Black);
   fill_solid(secondary_, bringup::kSquareStripPixels, CRGB::Black);
-  fill_solid(edge_a_, bringup::kEdgeStripPixels, CRGB::Black);
-  fill_solid(edge_b_, bringup::kEdgeStripPixels, CRGB::Black);
+  fill_solid(edge_a_, bringup::kEdgeStripPixels, CRGB::White);
+  fill_solid(edge_b_, bringup::kEdgeStripPixels, CRGB::White);
   const bool identifying = static_cast<int32_t>(identify_until_ms_ - now_ms) > 0;
   for (uint8_t square = 0; square < arcade::kSquaresPerQuadrant; ++square) {
     CRGB value = CRGB::Black;

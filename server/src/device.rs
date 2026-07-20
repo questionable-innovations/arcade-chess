@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 
 use crate::state::{random_hex, AppState};
 
-const MAX_MSG_BYTES: usize = 2048;
+// A full sensor.raw_scan carries four 64-entry arrays and can approach the old
+// 2 KiB ceiling once envelope metadata and longer device IDs are included.
+const MAX_MSG_BYTES: usize = 4096;
 const HEARTBEAT_MS: u64 = 15_000;
 
 /// Device event `type` values defined by websocket-api.md. Anything else is
@@ -223,5 +225,36 @@ fn handle_event(
             seq = ?seq,
             "seq gap or boot change; requested board.snapshot.get"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_raw_scan_fits_device_message_limit() {
+        let event = json!({
+            "v": 1,
+            "type": "sensor.raw_scan",
+            "device_id": "arcade-chess-production-001",
+            "boot_id": "ffffffff",
+            "seq": u32::MAX,
+            "at_ms": u32::MAX,
+            "data": {
+                "scan_id": u32::MAX,
+                "complete": true,
+                "captured_ms": u32::MAX,
+                "target_node_mask": 15,
+                "response_node_mask": 15,
+                "online_node_mask": 15,
+                "raw_adc": vec![1023; 64],
+                "baseline_adc": vec![1023; 64],
+                "noise_adc": vec![255; 64],
+                "state": vec!["uncertain"; 64],
+            }
+        });
+
+        assert!(event.to_string().len() <= MAX_MSG_BYTES);
     }
 }

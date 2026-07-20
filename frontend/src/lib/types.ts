@@ -30,8 +30,6 @@ export interface EventData {
 	rssi?: number;
 	heap?: number;
 	uptime?: number;
-	wifi_rssi?: number;
-	free_heap?: number;
 	level?: string;
 	component?: string;
 	message?: string;

@@ -68,8 +68,6 @@
 	});
 
 	const ds = $derived(selected?.device_status?.data ?? null);
-	const deviceRssi = $derived(ds?.rssi ?? ds?.wifi_rssi);
-	const deviceHeap = $derived(ds?.heap ?? ds?.free_heap);
 
 	function submitAuth(e: Event) {
 		e.preventDefault();
@@ -201,11 +199,11 @@
 						</div>
 						<div>
 							<dt>rssi</dt>
-							<dd class="tnum">{deviceRssi != null ? `${deviceRssi} dBm` : '—'}</dd>
+							<dd class="tnum">{ds?.rssi != null ? `${ds.rssi} dBm` : '—'}</dd>
 						</div>
 						<div>
 							<dt>heap</dt>
-							<dd class="tnum">{kb(deviceHeap)}</dd>
+							<dd class="tnum">{kb(ds?.heap)}</dd>
 						</div>
 						<div>
 							<dt>uptime</dt>
