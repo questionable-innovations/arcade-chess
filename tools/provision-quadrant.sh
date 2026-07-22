@@ -29,10 +29,27 @@ while (($#)); do
 done
 
 if [[ ! "$id" =~ ^[0-3]$ ]]; then usage; exit 2; fi
+clock="$(awk -F'"' '/^QUADRANT_CLOCK = "(internal|external)"$/ { print $2; exit }' "$root/tools/pio-targets.py")"
+case "$clock" in
+  internal)
+    firmware_env="ATmega328PB"
+    clock_description="internal 8 MHz RC"
+    ;;
+  external)
+    firmware_env="ATmega328PB"
+    clock_description="external 16 MHz crystal"
+    ;;
+  *) usage; exit 2 ;;
+esac
 if command -v pio >/dev/null 2>&1; then
   pio=(pio)
-else
+elif [[ -x "$HOME/.platformio/penv/bin/pio" ]]; then
+  pio=("$HOME/.platformio/penv/bin/pio")
+elif command -v uvx >/dev/null 2>&1; then
   pio=(uvx --from platformio platformio)
+else
+  echo "PlatformIO not found; install pio or uvx first" >&2
+  exit 1
 fi
 
 usbasp_attached() {
@@ -89,10 +106,14 @@ fi
 
 eeprom="${TMPDIR:-/tmp}/arcade-quadrant-${id}.eeprom.bin"
 python3 "$root/tools/make-quadrant-eeprom.py" --id "$id" --output "$eeprom"
-"${pio[@]}" run -d "$root/firmware-atmega" -e ATmega328PB
+"${pio[@]}" run -d "$root/firmware-atmega" -e "$firmware_env"
 
 echo "Target: ATmega328PB quadrant $id via $programmer${port:+ at $port}"
-echo "This will erase/program flash, fuses, and EEPROM. Verify 5 V, 16 MHz crystal, pin 1, and ISP orientation."
+echo "Clock: $clock_description (firmware environment $firmware_env)"
+echo "This will erase/program flash, fuses, and EEPROM. Verify 5 V, pin 1, and ISP orientation."
+if [[ "$clock" == "external" ]]; then
+  echo "External mode requires the 16 MHz crystal to be fitted before fuse programming."
+fi
 if ((with_bootloader)); then
   echo "Urboot will also be installed. Do not serial-upload with multiple quadrants connected to the shared UART."
 fi
@@ -137,7 +158,7 @@ if [[ -n "$port" ]]; then pio_options+=(--upload-port "$port"); fi
 
 avrdude="$HOME/.platformio/packages/tool-avrdude/avrdude"
 avrdude_conf="$HOME/.platformio/packages/tool-avrdude/avrdude.conf"
-firmware="$root/firmware-atmega/.pio/build/ATmega328PB/firmware.hex"
+firmware="$root/firmware-atmega/.pio/build/$firmware_env/firmware.hex"
 if [[ ! -x "$avrdude" ]]; then echo "avrdude not found at $avrdude" >&2; exit 1; fi
 base_args=(-C "$avrdude_conf" -p m328pb -c "$programmer")
 if [[ "$programmer" == "arduino_as_isp" ]]; then

@@ -16,6 +16,10 @@ The extra `intelhex` package is only needed by a transient `uvx` PlatformIO
 environment on some machines. A normal PlatformIO installation brings its own
 ESP image dependencies. Upload and monitor the ESP with:
 
+The active quadrant clock is the `QUADRANT_CLOCK` constant at the top of
+`tools/pio-targets.py`. It currently selects the crystal-free 8 MHz internal RC
+profile. The same value drives application builds, Custom tasks, and fuse burning.
+
 ```sh
 pio run -d firmware-esp -e esp32dev -t upload
 pio device monitor -b 115200
@@ -40,7 +44,8 @@ disabled in the prototype. Secrets live in ESP Preferences/NVS, not the reposito
 ## Provision a quadrant over ISP
 
 Connect VCC, GND, RESET, MOSI, MISO, and SCK from the programmer to the quadrant
-ISP header. Confirm 5 V, the external 16 MHz crystal, and header orientation.
+ISP header. Confirm 5 V and header orientation. The default provisioning profile
+uses the internal 8 MHz RC oscillator and does not require a fitted crystal.
 
 ```sh
 # Dry run: builds and describes the target without writing it
@@ -56,8 +61,8 @@ tools/provision-quadrant.sh --id 0 --programmer arduino-as-isp \
 ```
 
 Repeat with IDs 1, 2, and 3. The tool generates a complete EEPROM image containing
-the CRC-protected identity and configuration defaults, sets external-crystal/BOD/
-EEPROM-preserve fuses, writes the application, and verifies flash plus EEPROM. It
+the CRC-protected identity and configuration defaults, sets clock/BOD/
+EEPROM-preserve fuses, writes the matching application, and verifies flash plus EEPROM. It
 accepts `--port` and `--bitclock` for programmers that need them. Auto-selection
 prefers an enumerated USBasp; otherwise it requires exactly one USB modem/serial
 port and uses the standard ArduinoISP sketch protocol at 19,200 baud. Pass
@@ -72,8 +77,10 @@ upload with multiple quadrants on the shared UART: they receive the same bytes a
 their responses would collide. `fw-flash` is safe with all quadrants attached
 because the maintenance broadcast suppresses non-target responses first.
 
-Fuse programming is recoverability-sensitive. This setup is only for an
-ATmega328PB with an external 16 MHz crystal and 2.7 V brown-out.
+Fuse programming is recoverability-sensitive. Before changing clock source, set
+`QUADRANT_CLOCK` to `"internal"` or `"external"` in `tools/pio-targets.py`, then
+rebuild and re-provision every quadrant using the same Custom tasks. Do not select
+external until the 16 MHz crystals are fitted.
 
 ## Update a quadrant over the ESP USB port
 
@@ -95,6 +102,7 @@ tools/flash-quadrant.py --simultaneous --build
 # Flash an existing image
 tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
     --hex firmware-atmega/.pio/build/ATmega328PB/firmware.hex
+
 ```
 
 `--port` is auto-detected when exactly one USB serial device is attached. These

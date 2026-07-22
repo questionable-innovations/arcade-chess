@@ -135,7 +135,7 @@
 						type="password"
 						bind:value={password}
 						placeholder="password"
-						autocomplete="off"
+						autocomplete="current-password"
 						autofocus
 						onblur={() => (adminOpen = false)}
 					/>

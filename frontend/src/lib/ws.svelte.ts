@@ -18,6 +18,7 @@ const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 15000;
 const STABLE_MS = 5000;
 const LOG_MAX = 250;
+const AUTH_PASSWORD_KEY_PREFIX = 'arcade-chess.admin-password:';
 
 // Classify an envelope for log colour-coding in the debug console.
 function levelOf(env: Envelope): TickEntry['level'] {
@@ -127,6 +128,7 @@ class WsStore {
 	#stableTimer: ReturnType<typeof setTimeout> | null = null;
 	#started = false;
 	#tickId = 0;
+	#pendingAuthPassword: string | null = null;
 
 	connect(): void {
 		if (this.#started) return;
@@ -140,6 +142,7 @@ class WsStore {
 	}
 
 	auth(password: string): void {
+		this.#pendingAuthPassword = password;
 		this.#send({ type: 'auth', password });
 	}
 
@@ -186,6 +189,11 @@ class WsStore {
 		socket.onopen = () => {
 			this.connected = true;
 			this.authed = false;
+			const password = this.#pendingAuthPassword ?? this.#rememberedPassword();
+			if (password) {
+				this.#pendingAuthPassword = password;
+				this.#send({ type: 'auth', password });
+			}
 			// Reset backoff only once the connection proves stable, so a server that
 			// accepts then immediately drops keeps backing off instead of hot-looping.
 			this.#stableTimer = setTimeout(() => {
@@ -242,6 +250,14 @@ class WsStore {
 				break;
 			case 'auth.result':
 				this.authed = !!msg.ok;
+				if (this.#pendingAuthPassword) {
+					if (msg.ok) {
+						this.#rememberPassword(this.#pendingAuthPassword);
+					} else {
+						this.#forgetPassword(this.#pendingAuthPassword);
+					}
+					this.#pendingAuthPassword = null;
+				}
 				this.#pushInfo(`auth ${msg.ok ? 'ok' : 'failed'}`);
 				break;
 			case 'command.queued':
@@ -315,6 +331,35 @@ class WsStore {
 
 	#pushInfo(text: string, level: TickEntry['level'] = 'info'): void {
 		this.events = [{ id: this.#tickId++, at: '·', text, level }, ...this.events].slice(0, LOG_MAX);
+	}
+
+	#authPasswordKey(): string {
+		return `${AUTH_PASSWORD_KEY_PREFIX}${resolveUrl()}`;
+	}
+
+	#rememberedPassword(): string | null {
+		try {
+			return localStorage.getItem(this.#authPasswordKey());
+		} catch {
+			return null;
+		}
+	}
+
+	#rememberPassword(password: string): void {
+		try {
+			localStorage.setItem(this.#authPasswordKey(), password);
+		} catch {
+			// Authentication still works when storage is unavailable.
+		}
+	}
+
+	#forgetPassword(password: string): void {
+		try {
+			const key = this.#authPasswordKey();
+			if (localStorage.getItem(key) === password) localStorage.removeItem(key);
+		} catch {
+			// Nothing to clear when storage is unavailable.
+		}
 	}
 
 	// ── Offline demo harness ──────────────────────────────────────────────────

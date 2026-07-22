@@ -10,7 +10,29 @@ from pathlib import Path
 
 Import("env")  # noqa: F821  (SCons construction environment)
 
-REPO_ROOT = Path(env["PROJECT_DIR"]).resolve().parent
+# Single project-wide clock switch. Change only this value, then rebuild and
+# re-provision every quadrant. Valid values: "internal" or "external".
+QUADRANT_CLOCK = "internal"
+
+CLOCK_PROFILES = {
+    "internal": {"f_cpu": "8000000L", "oscillator": "internal", "label": "8 MHz internal RC"},
+    "external": {"f_cpu": "16000000L", "oscillator": "external", "label": "16 MHz crystal"},
+}
+if QUADRANT_CLOCK not in CLOCK_PROFILES:
+    raise ValueError(f"invalid QUADRANT_CLOCK: {QUADRANT_CLOCK}")
+CLOCK_PROFILE = CLOCK_PROFILES[QUADRANT_CLOCK]
+
+# This is a pre-build script: update the board settings before the Arduino core,
+# application, fuse image, or bootloader targets are configured.
+env.BoardConfig().update("build.f_cpu", CLOCK_PROFILE["f_cpu"])
+env.BoardConfig().update("hardware.oscillator", CLOCK_PROFILE["oscillator"])
+env.Replace(BOARD_F_CPU=CLOCK_PROFILE["f_cpu"])
+
+REPO_ROOT = Path(env["PROJECT_DIR"]).resolve()
+while REPO_ROOT.parent != REPO_ROOT and not (REPO_ROOT / "tools" / "pio-targets.py").is_file():
+    REPO_ROOT = REPO_ROOT.parent
+if not (REPO_ROOT / "tools" / "pio-targets.py").is_file():
+    raise RuntimeError("could not locate arcade-chess repository root")
 TOOLS = REPO_ROOT / "tools"
 PROTOCOL_TESTS = REPO_ROOT / "protocol" / "test" / "run-host-tests.sh"
 QUADRANT_COUNT = 4
@@ -53,7 +75,7 @@ if env["PIOENV"] == "ATmega328PB":
             dependencies=None,
             actions=[f'"{TOOLS}/provision-quadrant.sh" --id {node} --yes'],
             title=f"Provision quadrant {node} (ISP)",
-            description="Fuses, Urboot, application, and identity EEPROM via USBasp",
+            description=f"{CLOCK_PROFILE['label']}: fuses, Urboot, application, and EEPROM",
         )
     add_protocol_tests()
 elif env["PIOENV"] == "esp32dev":

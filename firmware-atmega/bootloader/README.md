@@ -18,9 +18,14 @@ f77ca7b03299fbd80c779764d4b6ac4cf1303e18e7c1e9ad1f3bcf7923158347
 ```
 
 It occupies 444 bytes and fits the existing 512-byte boot section. The build is
-for `atmega328pb`, 16 MHz, UART0 autobaud, two-second watchdog window, hardware
+for `atmega328pb`, UART0 autobaud, two-second watchdog window, hardware
 boot mode, EEPROM support, chip erase, and Urprotocol. The response bytes for
 this exact feature build are `UR_INSYNC=0xE0` and `UR_OK=0x78`.
+
+Urboot's autobaud implementation makes this same reviewed image usable with the
+project's 8 MHz internal-RC and 16 MHz external-crystal clock settings.
+`F_CPU=16000000L` below records the value used to reproduce the reviewed
+artifact; application firmware must still be compiled for its real clock.
 
 To reproduce it, check out the pinned upstream commit, apply the patch, then use
 the PlatformIO AVR toolchain to compile `src/urboot.c` with:
