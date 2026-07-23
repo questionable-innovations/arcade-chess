@@ -44,6 +44,53 @@ export interface EventData {
 	raw_adc?: (number | null)[];
 	baseline_adc?: (number | null)[];
 	noise_adc?: (number | null)[];
+	// diagnostic.bus
+	direction?: string;
+	uart_seq?: number;
+	message_type?: number;
+	result?: string;
+	raw_hex?: string;
+	dropped?: number;
+	reason?: string;
+}
+
+// UART message-type names (protocol/include/arcade_protocol/protocol.h).
+export const MESSAGE_TYPE_NAMES: Record<number, string> = {
+	0x01: 'PING',
+	0x02: 'INFO',
+	0x03: 'STATUS',
+	0x04: 'TIME_SYNC',
+	0x05: 'CONFIG_GET',
+	0x06: 'CONFIG_SET',
+	0x0f: 'ERROR',
+	0x20: 'POLL_EVENTS',
+	0x21: 'EVENT_BATCH',
+	0x22: 'GET_SNAPSHOT',
+	0x23: 'SENSOR_SNAPSHOT',
+	0x24: 'GET_RAW_SCAN',
+	0x25: 'RAW_SCAN',
+	0x30: 'CALIBRATE',
+	0x31: 'CALIBRATION_RESULT',
+	0x40: 'SET_SQUARES',
+	0x41: 'SET_BRIGHTNESS',
+	0x42: 'IDENTIFY',
+	0x43: 'CLEAR_LIGHTING',
+	0x44: 'RENDER_WINDOW',
+	0x50: 'SET_DEBUG',
+	0x60: 'FW_PREFLIGHT',
+	0x61: 'MAINTENANCE_BEGIN',
+	0x62: 'FW_PREPARE',
+	0x63: 'FW_ENTER_BOOTLOADER',
+	0x64: 'MAINTENANCE_END',
+	0x65: 'FW_HEALTH',
+	0x66: 'FW_CONFIRM'
+};
+
+export function messageTypeLabel(type: number | undefined): string {
+	if (type == null) return '?';
+	const hex = `0x${type.toString(16).padStart(2, '0')}`;
+	const name = MESSAGE_TYPE_NAMES[type];
+	return name ? `${name} ${hex}` : hex;
 }
 
 // Sensor front-end constants, taken from the firmware (10-bit ADC, AVCC ref).
@@ -131,6 +178,14 @@ export interface InMsg {
 	reason?: string;
 }
 
+// Live calibration readout per node, driven by calibration.progress/result.
+export interface CalibrationState {
+	active: boolean;
+	percent: number;
+	ok?: boolean;
+	reason?: string;
+}
+
 // Reconstructed per-device state driving the UI.
 export interface DeviceState {
 	device_id: string;
@@ -144,6 +199,7 @@ export interface DeviceState {
 	node_status: (Envelope | null)[];
 	device_status: Envelope | null;
 	raw_scan: Envelope | null;
+	calibration: (CalibrationState | null)[];
 	lastEventAt: number;
 }
 
@@ -168,6 +224,7 @@ export function emptyDevice(id: string): DeviceState {
 		node_status: [null, null, null, null],
 		device_status: null,
 		raw_scan: null,
+		calibration: [null, null, null, null],
 		lastEventAt: 0
 	};
 }
@@ -195,7 +252,9 @@ export function summarize(env: Envelope): string {
 		case 'calibration.progress':
 			return `calibration.progress n${d.node} ${d.phase ?? ''} ${d.percent ?? ''}%`;
 		case 'calibration.result':
-			return `calibration.result n${d.node} ${d.ok ? 'ok' : 'fail'}`;
+			return `calibration.result n${d.node} ${d.ok ? 'ok' : 'fail'}${d.reason ? ` ${d.reason}` : ''}`;
+		case 'diagnostic.bus':
+			return `bus ${d.direction ?? '?'} n${d.node ?? '?'} seq=${d.uart_seq ?? '?'} ${messageTypeLabel(d.message_type)} ${d.result ?? ''}${d.raw_hex ? ` [${d.raw_hex}]` : ''}`;
 		default:
 			return env.type;
 	}

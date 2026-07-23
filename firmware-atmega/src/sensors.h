@@ -28,6 +28,7 @@ class Sensors {
   uint16_t calibrationSamples() const { return calibration_scans_; }
   bool calibrationJustFinished();
   bool calibrationSucceeded() const { return calibration_ok_; }
+  uint8_t calibrationPhaseCode() const;
   bool startRawCapture(uint8_t samples);
   bool rawCaptureReady() const { return raw_capture_ready_; }
   bool rawCaptureBusy() const { return raw_capture_active_ || raw_capture_ready_; }
@@ -67,6 +68,7 @@ class Sensors {
   bool calibration_active_ = false;
   bool calibration_finished_ = false;
   bool calibration_ok_ = false;
+  bool calibration_has_result_ = false;
   uint16_t calibration_scans_ = 0;
   uint32_t calibration_sum_[arcade::kSquaresPerQuadrant]{};
   uint16_t calibration_min_[arcade::kSquaresPerQuadrant]{};

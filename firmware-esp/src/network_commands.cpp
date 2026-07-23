@@ -63,6 +63,16 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     const uint32_t duration = requested_duration > 600000U ? 600000U : requested_duration;
     raw_stream_until_ms_ = duration ? millis() + duration : 0;
     next_raw_stream_ms_ = millis(); accepted = true;
+  } else if (!strcmp(name, "diagnostics.trace")) {
+    trace_enabled_ = args["enabled"] | false;
+    trace_raw_frames_ = args["raw_frames"] | true;
+    const uint32_t requested_duration = args["duration_ms"] | 60000U;
+    const uint32_t duration = requested_duration > 600000U ? 600000U : requested_duration;
+    trace_until_ms_ = millis() + duration;
+    trace_window_ms_ = millis();
+    trace_window_count_ = 0;
+    trace_dropped_ = 0;
+    accepted = true;
   } else if (!strcmp(name, "device.mode.set")) {
     const char* requested_mode = args["mode"] | "";
     arcade::RuntimeMode mode;

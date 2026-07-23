@@ -75,8 +75,44 @@
 		adminOpen = false;
 	}
 
+	let probeFlash = $state<number | null>(null);
+	let probeTimer: ReturnType<typeof setTimeout> | null = null;
+
 	function onSquare(i: number) {
-		if (ws.authed && selected) ws.probe(selected.device_id, i);
+		if (!ws.authed || !selected) return;
+		ws.probe(selected.device_id, i);
+		// Mirror the physical blue flash on screen so a dead LED chain is still
+		// distinguishable from a dead command path.
+		probeFlash = null;
+		if (probeTimer) clearTimeout(probeTimer);
+		requestAnimationFrame(() => (probeFlash = i));
+		probeTimer = setTimeout(() => (probeFlash = null), 1300);
+	}
+
+	// Calibration requires an empty board; arm-then-confirm instead of a modal.
+	let calArm = $state<number | 'all' | null>(null);
+	let calArmTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function onCalibrate(node: number | 'all') {
+		if (!ws.authed || !selected) return;
+		if (calArm !== node) {
+			calArm = node;
+			if (calArmTimer) clearTimeout(calArmTimer);
+			calArmTimer = setTimeout(() => (calArm = null), 4000);
+			return;
+		}
+		calArm = null;
+		if (calArmTimer) clearTimeout(calArmTimer);
+		ws.calibrate(selected.device_id, node);
+	}
+
+	function calLabel(n: number): string {
+		const c = selected?.calibration[n];
+		if (!c) return 'cal';
+		if (c.active) return `${c.percent}%`;
+		if (c.ok === true) return 'ok';
+		if (c.ok === false) return 'fail';
+		return 'cal';
 	}
 
 	// Streaming and the heatmap go together — turning the live scan on lights it up.
@@ -166,6 +202,7 @@
 				{heatmap}
 				{heatSpan}
 				admin={ws.authed}
+				{probeFlash}
 				{onSquare}
 			/>
 			{#if !debug}
@@ -213,19 +250,44 @@
 				</div>
 
 				<div class="card">
-					<h3>Quadrants</h3>
+					<div class="cardhead">
+						<h3>Quadrants</h3>
+						<button
+							class="chip"
+							class:arm={calArm === 'all'}
+							disabled={!ws.authed || !selected}
+							onclick={() => onCalibrate('all')}
+							title="calibrate every online quadrant (board must be empty)"
+						>
+							{calArm === 'all' ? 'board empty?' : 'calibrate all'}
+						</button>
+					</div>
 					<ul class="nodes">
 						{#each [0, 1, 2, 3] as n (n)}
 							{@const h = nodeHealth(selected?.node_status[n] ?? null)}
 							{@const d = selected?.node_status[n]?.data}
+							{@const cal = selected?.calibration[n]}
 							<li>
-								<span class="ring {h}"></span>
+								<span class="ring {h}" class:pulse={cal?.active}></span>
 								<span class="nname tnum">{nodeLabel[n]}</span>
-								<span class="nstate {h}">{h}</span>
+								<span class="nstate {h}">{cal?.active ? 'calibrating' : h}</span>
 								<span class="nfw tnum">{d?.firmware ?? ''}</span>
+								<button
+									class="chip ncal"
+									class:arm={calArm === n}
+									class:bad={cal?.ok === false}
+									disabled={!ws.authed || h === 'offline' || h === 'unseen' || cal?.active}
+									onclick={() => onCalibrate(n)}
+									title={cal?.ok === false
+										? `calibration failed: ${cal.reason ?? 'unknown'}`
+										: 'calibrate this quadrant (empty board)'}
+								>
+									{calArm === n ? 'empty?' : calLabel(n)}
+								</button>
 							</li>
 						{/each}
 					</ul>
+					{#if !ws.authed}<p class="note">authenticate as admin to calibrate</p>{/if}
 				</div>
 
 				<div class="card">
@@ -514,6 +576,27 @@
 		border-color: color-mix(in srgb, var(--color-pos) 45%, var(--color-line));
 		background: color-mix(in srgb, var(--color-pos) 14%, transparent);
 	}
+	.chip.arm {
+		color: var(--color-warn);
+		border-color: color-mix(in srgb, var(--color-warn) 55%, var(--color-line));
+		background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+	}
+	.chip.bad {
+		color: var(--color-fault);
+		border-color: color-mix(in srgb, var(--color-fault) 45%, var(--color-line));
+	}
+	.ncal {
+		margin-left: 8px;
+		min-width: 5ch;
+	}
+	.ring.pulse {
+		animation: cal-pulse 1s ease-in-out infinite;
+	}
+	@keyframes cal-pulse {
+		50% {
+			opacity: 0.35;
+		}
+	}
 	dl {
 		margin: 0;
 		display: flex;
@@ -598,6 +681,9 @@
 		margin-left: auto;
 		color: var(--color-fg-ghost);
 		font-size: 10px;
+	}
+	.nodes .chip {
+		flex: none;
 	}
 
 	.scanmeta {

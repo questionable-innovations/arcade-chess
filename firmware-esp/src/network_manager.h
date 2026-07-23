@@ -18,6 +18,8 @@ class NetworkManager {
   void publishBusTrace(const char* direction, uint8_t node, uint8_t sequence,
                        arcade::MessageType type, const char* result,
                        const uint8_t* payload, uint8_t length);
+  void publishCalibrationProgress(uint8_t node, uint8_t percent);
+  void publishCalibrationResult(uint8_t node, bool ok, const char* reason);
   void commandComplete(const char* id, bool ok, const char* reason);
   void publishSnapshot();
   void setRuntimeMode(arcade::RuntimeMode mode) { runtime_mode_ = mode; }
@@ -67,6 +69,7 @@ class NetworkManager {
   uint32_t trace_until_ms_ = 0;
   uint32_t trace_window_ms_ = 0;
   uint8_t trace_window_count_ = 0;
+  uint16_t trace_dropped_ = 0;
   CommandRecord command_history_[kCommandHistorySize]{};
   uint8_t command_history_next_ = 0;
   String extra_headers_;

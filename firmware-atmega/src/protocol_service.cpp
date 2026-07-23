@@ -152,7 +152,9 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       arcade::putU16(response.payload + 11, rx_bad_);
       arcade::putU16(response.payload + 13, sensors_.overflowCount());
       arcade::putU16(response.payload + 15, system_info::supplyMillivolts());
-      response.payload_length = 17;
+      response.payload[17] = sensors_.calibrationPhaseCode();
+      response.payload[18] = sensors_.calibrationPercent();
+      response.payload_length = 19;
       break;
     case arcade::MessageType::kPollEvents: {
       const uint8_t requested = request.payload_length ? request.payload[0] : 4;

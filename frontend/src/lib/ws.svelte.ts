@@ -18,6 +18,7 @@ const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 15000;
 const STABLE_MS = 5000;
 const LOG_MAX = 250;
+const BUS_LOG_MAX = 400;
 const AUTH_PASSWORD_KEY_PREFIX = 'arcade-chess.admin-password:';
 
 // Classify an envelope for log colour-coding in the debug console.
@@ -75,6 +76,19 @@ function applyEvent(dev: DeviceState, env: Envelope): void {
 		dev.device_status = env;
 	} else if (env.type === 'sensor.raw_scan') {
 		dev.raw_scan = env;
+	} else if (env.type === 'calibration.progress' && typeof d.node === 'number') {
+		if (d.node >= 0 && d.node < 4) {
+			dev.calibration[d.node] = { active: true, percent: d.percent ?? 0 };
+		}
+	} else if (env.type === 'calibration.result' && typeof d.node === 'number') {
+		if (d.node >= 0 && d.node < 4) {
+			dev.calibration[d.node] = {
+				active: false,
+				percent: 100,
+				ok: !!d.ok,
+				reason: d.reason
+			};
+		}
 	}
 
 	// Seqless envelopes (e.g. command.result) carry no boot_id/seq; they update the
@@ -122,6 +136,12 @@ class WsStore {
 	order = $state<string[]>([]);
 	events = $state<TickEntry[]>([]);
 	streaming = $state(false);
+	tracing = $state(false);
+	// Raw UART frame trace (diagnostic.bus), kept out of the main ticker so a
+	// 40 Hz trace doesn't drown semantic events. Client-side id: uart/device seqs
+	// reset on reboot, so they can't key the list.
+	busFrames = $state<{ id: number; env: Envelope }[]>([]);
+	#busId = 0;
 
 	#socket: WebSocket | null = null;
 	#backoff = BACKOFF_MIN;
@@ -163,6 +183,28 @@ class WsStore {
 			device_id: deviceId,
 			name: 'sensor.raw_scan.get',
 			args: { samples_per_square: 4 }
+		});
+	}
+
+	// Start baseline calibration on one node (0-3) or every online node.
+	calibrate(deviceId: string, node: number | 'all'): void {
+		this.#send({
+			type: 'command',
+			device_id: deviceId,
+			name: 'calibration.start',
+			args: { node }
+		});
+	}
+
+	// Toggle the UART frame trace (diagnostic.bus events with hex payloads).
+	setTrace(deviceId: string, enabled: boolean): void {
+		this.tracing = enabled;
+		if (enabled) this.busFrames = [];
+		this.#send({
+			type: 'command',
+			device_id: deviceId,
+			name: 'diagnostics.trace',
+			args: { enabled, raw_frames: true, duration_ms: 300000 }
 		});
 	}
 
@@ -275,6 +317,7 @@ class WsStore {
 		const devices: Record<string, DeviceState> = {};
 		const order: string[] = [];
 		const ticks: TickEntry[] = [];
+		const busReplay: { id: number; env: Envelope }[] = [];
 		for (const dv of msg.devices ?? []) {
 			const dev = emptyDevice(dv.device_id);
 			dev.connected = !!dv.connected;
@@ -289,7 +332,13 @@ class WsStore {
 			// snapshot from each device on client connect; the replay bridges the window
 			// until that snapshot arrives.
 			for (const env of recent) applyEvent(dev, env);
-			for (const env of recent.slice(-LOG_MAX)) ticks.push(this.#makeTick(env));
+			// An active trace fills the server's recent ring with bus frames; route
+			// them to the bus tab so they don't evict every semantic console entry.
+			const semantic = recent.filter((env) => env.type !== 'diagnostic.bus');
+			for (const env of semantic.slice(-LOG_MAX)) ticks.push(this.#makeTick(env));
+			for (const env of recent) {
+				if (env.type === 'diagnostic.bus') busReplay.push({ id: this.#busId++, env });
+			}
 			if (recent.length) dev.lastEventAt = Date.now();
 			devices[dv.device_id] = dev;
 			order.push(dv.device_id);
@@ -297,12 +346,17 @@ class WsStore {
 		this.devices = devices;
 		this.order = order;
 		this.events = ticks.reverse().slice(0, LOG_MAX);
+		this.busFrames = busReplay.reverse().slice(0, BUS_LOG_MAX);
 	}
 
 	#handleEvent(deviceId: string, env: Envelope): void {
 		const dev = this.#ensure(deviceId);
 		applyEvent(dev, env);
 		dev.lastEventAt = Date.now();
+		if (env.type === 'diagnostic.bus') {
+			this.busFrames = [{ id: this.#busId++, env }, ...this.busFrames].slice(0, BUS_LOG_MAX);
+			return;
+		}
 		this.events = [this.#makeTick(env), ...this.events].slice(0, LOG_MAX);
 	}
 

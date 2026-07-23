@@ -18,6 +18,7 @@
 		heatmap = false,
 		heatSpan = 512,
 		admin = false,
+		probeFlash = null,
 		onSquare
 	}: {
 		squares: SquareState[];
@@ -29,6 +30,7 @@
 		heatmap?: boolean;
 		heatSpan?: number;
 		admin?: boolean;
+		probeFlash?: number | null;
 		onSquare: (i: number) => void;
 	} = $props();
 
@@ -78,11 +80,22 @@
 		return `${s}${Math.abs(v).toFixed(2)}`;
 	}
 
-	function cellTitle(i: number, file: string, rank: number): string {
+	// Default (orientation 0) inverse of the ESP's globalSquare(): which node and
+	// local sensor index feed this global square — the first thing to check when
+	// a reading lands on the wrong square.
+	function localOf(i: number): number {
+		const r = Math.floor(i / 8);
+		const c = i % 8;
+		return (r % 4) * 4 + (c % 4);
+	}
+
+	function cellTitle(i: number, file: string, rank: number, node: number): string {
+		const base = `${file}${rank} · n${node} local ${localOf(i)}`;
 		const v = devVolts(i);
-		if (v == null) return `${file}${rank}`;
+		if (v == null) return base;
 		const s = v >= 0 ? '+' : '−';
-		return `${file}${rank} · ${s}${Math.abs(v).toFixed(3)} V · adc ${rawAdc?.[i]}`;
+		const noise = baselineAdc ? ` base ${baselineAdc[i] ?? '—'}` : '';
+		return `${base} · ${s}${Math.abs(v).toFixed(3)} V · adc ${rawAdc?.[i]}${noise}`;
 	}
 
 	const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
@@ -120,11 +133,12 @@
 				class:down={nodeDown(cell.node)}
 				class:invalid={!valid[cell.i]}
 				class:heat={heatOn}
+				class:probed={probeFlash === cell.i}
 				style:background={fillOf(cell.i)}
 				disabled={!admin}
 				onclick={() => onSquare(cell.i)}
 				aria-label={`${files[cell.col]}${cell.row + 1} ${squares[cell.i]}`}
-				title={debug ? cellTitle(cell.i, files[cell.col], cell.row + 1) : undefined}
+				title={debug ? cellTitle(cell.i, files[cell.col], cell.row + 1, cell.node) : undefined}
 			>
 				{#if debug && rawAdc}
 					<span class="volt" style:color={inkOf(cell.i)}>{voltLabel(cell.i)}</span>
@@ -333,21 +347,36 @@
 	.badge.healthy {
 		color: var(--color-fg);
 	}
+	/* Badge positions must match the cell→node attribution above: node 0 owns
+	   ranks 1-4 files a-d (bottom-left on screen), node 3 the top-right. */
 	.q0 {
-		top: 8px;
+		bottom: 8px;
 		left: 8px;
 	}
 	.q1 {
-		top: 8px;
+		bottom: 8px;
 		right: 8px;
 	}
 	.q2 {
-		bottom: 8px;
+		top: 8px;
 		left: 8px;
 	}
 	.q3 {
-		bottom: 8px;
+		top: 8px;
 		right: 8px;
+	}
+
+	.sq.probed {
+		box-shadow: inset 0 0 0 3px var(--color-probe);
+		animation: probe-fade 1.2s ease-out forwards;
+	}
+	@keyframes probe-fade {
+		from {
+			box-shadow: inset 0 0 0 3px var(--color-probe);
+		}
+		to {
+			box-shadow: inset 0 0 0 3px transparent;
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {

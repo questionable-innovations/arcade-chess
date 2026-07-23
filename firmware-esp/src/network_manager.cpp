@@ -10,6 +10,20 @@ constexpr uint32_t kHeartbeatPingIntervalMs = 15000;
 constexpr uint32_t kHeartbeatPongTimeoutMs = 3000;
 constexpr uint8_t kHeartbeatMissLimit = 2;
 constexpr uint32_t kStatusPublishIntervalMs = 15000;
+// Bus trace budget: the bus runs ~50-100 frames/s, which would swamp the
+// WebSocket and every viewer; cap events per rolling second and count drops.
+constexpr uint8_t kTraceEventsPerSecond = 40;
+constexpr uint32_t kTraceDefaultDurationMs = 60000;
+constexpr uint32_t kTraceMaximumDurationMs = 600000;
+
+void hexEncode(const uint8_t* data, uint8_t length, char* output) {
+  static const char digits[] = "0123456789abcdef";
+  for (uint8_t i = 0; i < length; ++i) {
+    output[i * 2] = digits[data[i] >> 4];
+    output[i * 2 + 1] = digits[data[i] & 0x0f];
+  }
+  output[length * 2] = 0;
+}
 }
 
 void NetworkManager::begin(AppConfig& config, BusManager& bus) {
@@ -180,6 +194,67 @@ void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
       raw.add(nullptr); baseline.add(nullptr); noise.add(nullptr); states.add(nullptr);
     }
   }
+  String json; serializeJson(doc, json); sendJson(json);
+}
+
+void NetworkManager::publishBusTrace(const char* direction, uint8_t node,
+                                     uint8_t sequence, arcade::MessageType type,
+                                     const char* result, const uint8_t* payload,
+                                     uint8_t length) {
+  if (!welcomed_ || !trace_enabled_) return;
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - trace_until_ms_) >= 0) {
+    trace_enabled_ = false;
+    return;
+  }
+  if (static_cast<int32_t>(now - trace_window_ms_) >= 1000) {
+    trace_window_ms_ = now;
+    trace_window_count_ = 0;
+  }
+  if (trace_window_count_ >= kTraceEventsPerSecond) {
+    if (trace_dropped_ != UINT16_MAX) ++trace_dropped_;
+    return;
+  }
+  ++trace_window_count_;
+  JsonDocument doc;
+  doc["v"] = 1; doc["type"] = "diagnostic.bus"; doc["device_id"] = config_->device_id;
+  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
+  doc["at_ms"] = now; JsonObject data = doc["data"].to<JsonObject>();
+  data["direction"] = direction;
+  data["node"] = node;
+  data["uart_seq"] = sequence;
+  data["message_type"] = static_cast<uint8_t>(type);
+  data["result"] = result;
+  if (trace_raw_frames_ && payload && length) {
+    char hex[2 * arcade::kMaxPayload + 1];
+    hexEncode(payload, length, hex);
+    data["raw_hex"] = hex;
+  }
+  if (trace_dropped_) {
+    data["dropped"] = trace_dropped_;
+    trace_dropped_ = 0;
+  }
+  String json; serializeJson(doc, json); sendJson(json);
+}
+
+void NetworkManager::publishCalibrationProgress(uint8_t node, uint8_t percent) {
+  if (!welcomed_) return;
+  JsonDocument doc;
+  doc["v"] = 1; doc["type"] = "calibration.progress"; doc["device_id"] = config_->device_id;
+  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
+  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  data["node"] = node; data["phase"] = "sampling"; data["percent"] = percent;
+  String json; serializeJson(doc, json); sendJson(json);
+}
+
+void NetworkManager::publishCalibrationResult(uint8_t node, bool ok, const char* reason) {
+  if (!welcomed_) return;
+  JsonDocument doc;
+  doc["v"] = 1; doc["type"] = "calibration.result"; doc["device_id"] = config_->device_id;
+  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
+  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  data["node"] = node; data["ok"] = ok;
+  if (reason) data["reason"] = reason;
   String json; serializeJson(doc, json); sendJson(json);
 }
 

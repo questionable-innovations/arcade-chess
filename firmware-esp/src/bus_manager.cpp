@@ -11,7 +11,21 @@ constexpr uint32_t kOnlinePollIntervalMs = 10;
 constexpr uint32_t kOfflineProbeBaseMs = 1000;
 constexpr uint32_t kOfflineProbeMaximumMs = 10000;
 constexpr uint8_t kOfflineTimeoutThreshold = 3;
-constexpr uint32_t kRawResponseTimeoutMs = 7000;
+// A raw capture takes samples × full_scan_ms on the node (full_scan_ms is
+// capped at 200 ms), so the deadline scales with the request instead of
+// stalling the whole bus for a worst-case constant.
+constexpr uint32_t kRawResponseBaseMs = 400;
+constexpr uint32_t kRawResponsePerSampleMs = 220;
+// Online nodes re-poll status every kPollCycleLength polls so calibration and
+// supply readings stay fresh; a calibrating node reports much more often.
+constexpr uint8_t kPollCycleLength = 32;
+constexpr uint8_t kPollCycleCalibrating = 6;
+constexpr uint32_t kCalibrationWatchMs = 30000;
+// Pre-extension firmware exposes only the persisted calibrated flag, which
+// startCalibration() never clears — so an already-calibrated node reads 1 for
+// the whole run and the flag alone can't signal completion. Wait out the run
+// (128 scans x default 16 ms plus margin) before trusting the flag.
+constexpr uint32_t kLegacyCalibrationSettleMs = 8000;
 constexpr uint32_t kPersistentWriteTimeoutMs = 300;
 constexpr uint32_t kTransientMissRetryMs = 50;
 constexpr uint32_t kRenderQuietMs = 4;
@@ -162,6 +176,14 @@ void BusManager::tick(uint32_t now_ms) {
   // reception would consume raw programmer bytes.
   if (programming_handoff_) return;
   receive(now_ms);
+  for (uint8_t index = 0; index < arcade::kQuadrantCount; ++index) {
+    QuadrantState& node = nodes_[index];
+    if (node.calibration_watch &&
+        static_cast<int32_t>(now_ms - node.calibration_deadline_ms) >= 0) {
+      node.calibration_watch = false;
+      if (callbacks_.calibrationResult) callbacks_.calibrationResult(index, false, "timeout");
+    }
+  }
   if (pending_ && static_cast<int32_t>(now_ms - deadline_ms_) >= 0) handleTimeout(now_ms);
   if (!pending_) schedule(now_ms);
 }
@@ -197,7 +219,7 @@ void BusManager::send(uint8_t node, arcade::MessageType type, const uint8_t* pay
   const bool slow_eeprom = type == arcade::MessageType::kFwPrepare ||
                            type == arcade::MessageType::kFwEnterBootloader;
   deadline_ms_ = now_ms + (type == arcade::MessageType::kGetRawScan
-      ? kRawResponseTimeoutMs
+      ? kRawResponseBaseMs + raw_samples_ * kRawResponsePerSampleMs
       : slow_eeprom ? kPersistentWriteTimeoutMs : kResponseTimeoutMs);
   copyCorrelation(pending_correlation_, correlation);
   if (callbacks_.busTrace) {
@@ -262,12 +284,42 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     raw_response_mask_ |= 1U << frame.source;
     finishRawIfReady();
   } else if (ok && pending_type_ == arcade::MessageType::kStatus && frame.payload_length >= 7) {
+    const uint32_t uptime_ms = arcade::getU32(frame.payload);
+    // An uptime step backwards means the node rebooted mid-watch; its restored
+    // EEPROM flag (and phase code 2) must not masquerade as a fresh completion.
+    if (node.calibration_watch && uptime_ms < node.last_uptime_ms) {
+      node.calibration_watch = false;
+      if (callbacks_.calibrationResult) {
+        callbacks_.calibrationResult(frame.source, false, "node_reset");
+      }
+    }
+    node.last_uptime_ms = uptime_ms;
     node.reset_cause = frame.payload[4];
     const bool calibrated = frame.payload[5] != 0;
     if (node.calibrated != calibrated) {
       node.calibrated = calibrated;
       if (callbacks_.nodeStatusChanged) callbacks_.nodeStatusChanged(frame.source);
     }
+    if (frame.payload_length >= 19) {
+      updateCalibration(frame.source, frame.payload[17], frame.payload[18], now_ms);
+    } else if (node.calibration_watch &&
+               static_cast<int32_t>(now_ms - (node.calibration_started_ms +
+                                              kLegacyCalibrationSettleMs)) >= 0) {
+      node.calibration_watch = false;
+      if (callbacks_.calibrationResult) {
+        callbacks_.calibrationResult(frame.source, calibrated,
+                                     calibrated ? nullptr : "not_calibrated");
+      }
+    }
+  } else if (ok && pending_type_ == arcade::MessageType::kCalibrate &&
+             frame.type == arcade::MessageType::kCalibrationResult) {
+    // Calibration accepted; completion arrives via the status poll.
+    node.calibration_watch = true;
+    node.calibration_started_ms = now_ms;
+    node.calibration_deadline_ms = now_ms + kCalibrationWatchMs;
+    node.cal_percent = 0;
+    poll_count_[frame.source] = 0;
+    if (callbacks_.calibrationProgress) callbacks_.calibrationProgress(frame.source, 0);
   } else if (ok && pending_type_ == arcade::MessageType::kInfo &&
              frame.payload_length >= 3) {
     const bool changed = !node.fw_known ||
@@ -297,6 +349,14 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     programming_handoff_ = true;
     Serial.printf("[%10u][I][FW] target=%u ACKed bootloader entry; framed polling stopped\n",
                   now_ms, frame.source);
+  } else if (pending_type_ == arcade::MessageType::kGetRawScan) {
+    // Error (busy/unsupported) or unexpected-type reply: the node's slot must
+    // still complete, or the scheduler retries this node forever and starves
+    // every other poll on the bus.
+    Serial.printf("[%10u][W][RAW] node=%u rejected raw scan type=0x%02x\n", now_ms,
+                  frame.source, static_cast<unsigned>(frame.type));
+    raw_done_mask_ |= 1U << frame.source;
+    finishRawIfReady();
   }
   if (!ok && pending_type_ == arcade::MessageType::kFwPrepare) {
     // Drop only queued firmware-handoff commands; unrelated commands (and their
@@ -382,6 +442,37 @@ void BusManager::handleTimeout(uint32_t now_ms) {
     finishRawIfReady();
   } else if (pending_correlation_[0] && callbacks_.commandComplete) {
     callbacks_.commandComplete(pending_correlation_, false, "timeout");
+  }
+}
+
+// Maps the node's calibration phase codes (0 never, 1 sampling, 2 ok, 3 failed)
+// onto progress/result callbacks. Results fire only while a watch is armed so a
+// reboot-time "2" from EEPROM never replays as a fresh completion.
+void BusManager::updateCalibration(uint8_t index, uint8_t phase, uint8_t percent,
+                                   uint32_t now_ms) {
+  (void)now_ms;
+  QuadrantState& node = nodes_[index];
+  const uint8_t previous_phase = node.cal_phase;
+  const uint8_t previous_percent = node.cal_percent;
+  node.cal_phase = phase;
+  node.cal_percent = percent;
+  if (phase == 1) {
+    if (percent != previous_percent && callbacks_.calibrationProgress) {
+      callbacks_.calibrationProgress(index, percent);
+    }
+    return;
+  }
+  if (!node.calibration_watch) return;
+  if (phase == 2 || phase == 3) {
+    node.calibration_watch = false;
+    if (callbacks_.calibrationResult) {
+      callbacks_.calibrationResult(index, phase == 2,
+                                   phase == 2 ? nullptr : "noise_or_baseline_out_of_range");
+    }
+  } else if (previous_phase == 1) {
+    // Sampling stopped without a result code — treat as cancelled.
+    node.calibration_watch = false;
+    if (callbacks_.calibrationResult) callbacks_.calibrationResult(index, false, "cancelled");
   }
 }
 
@@ -487,6 +578,9 @@ void BusManager::schedule(uint32_t now_ms) {
       return;
     }
     const uint8_t max_events = kMaximumEventsPerPoll;
+    const uint8_t cycle = nodes_[node].calibration_watch
+        ? kPollCycleCalibrating : kPollCycleLength;
+    if (poll_count_[node] >= cycle) poll_count_[node] = 0;
     const uint8_t count = ++poll_count_[node];
     if (count == 1) send(node, arcade::MessageType::kStatus, nullptr, 0, nullptr, now_ms);
     else if (count == 2) send(node, arcade::MessageType::kGetSnapshot, nullptr, 0, nullptr, now_ms);

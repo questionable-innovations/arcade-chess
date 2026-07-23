@@ -100,6 +100,7 @@ void Sensors::completeScan(uint32_t now_ms) {
       if (calibration_ok_) saveSettings(settings_);
       calibration_active_ = false;
       calibration_finished_ = true;
+      calibration_has_result_ = true;
     }
     return;
   }
@@ -167,13 +168,23 @@ void Sensors::startCalibration() {
   calibration_scans_ = 0;
   calibration_ok_ = false;
   calibration_finished_ = false;
+  calibration_has_result_ = false;
   calibration_active_ = true;
 }
 
 void Sensors::cancelCalibration() {
   calibration_active_ = false;
   calibration_finished_ = true;
+  calibration_has_result_ = true;
   calibration_ok_ = false;
+}
+
+// Wire codes for the status payload: 0 = never calibrated, 1 = sampling,
+// 2 = last run succeeded (or restored from EEPROM), 3 = last run failed.
+uint8_t Sensors::calibrationPhaseCode() const {
+  if (calibration_active_) return 1;
+  if (calibration_has_result_) return calibration_ok_ ? 2 : 3;
+  return settings_.calibrated ? 2 : 0;
 }
 
 uint8_t Sensors::calibrationPercent() const {

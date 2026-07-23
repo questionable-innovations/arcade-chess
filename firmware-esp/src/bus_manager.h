@@ -16,6 +16,14 @@ struct QuadrantState {
   uint16_t bad_frames = 0;
   uint16_t measured_avcc_mv = 0;
   uint8_t consecutive_timeouts = 0;
+  // Calibration wire codes from the extended status payload; 0xff = unknown
+  // (offline or pre-extension firmware).
+  uint8_t cal_phase = 0xff;
+  uint8_t cal_percent = 0xff;
+  bool calibration_watch = false;
+  uint32_t calibration_deadline_ms = 0;
+  uint32_t calibration_started_ms = 0;
+  uint32_t last_uptime_ms = 0;
   uint16_t raw[arcade::kSquaresPerQuadrant]{};
   uint16_t baseline[arcade::kSquaresPerQuadrant]{};
   uint8_t noise[arcade::kSquaresPerQuadrant]{};
@@ -31,6 +39,8 @@ struct BusCallbacks {
   void (*nodeStatusChanged)(uint8_t node) = nullptr;
   void (*fwResponse)(uint8_t node, arcade::MessageType type, bool ok,
                      const uint8_t* payload, uint8_t length) = nullptr;
+  void (*calibrationProgress)(uint8_t node, uint8_t percent) = nullptr;
+  void (*calibrationResult)(uint8_t node, bool ok, const char* reason) = nullptr;
   void (*busTrace)(const char* direction, uint8_t node, uint8_t sequence,
                    arcade::MessageType type, const char* result,
                    const uint8_t* payload, uint8_t length) = nullptr;
@@ -103,6 +113,7 @@ class BusManager {
   bool queueNodeSync(uint8_t node);
   void parseRaw(uint8_t node, const arcade::Frame& frame);
   void finishRawIfReady();
+  void updateCalibration(uint8_t node, uint8_t phase, uint8_t percent, uint32_t now_ms);
   void openRenderWindow(uint32_t now_ms);
   void sendBroadcast(arcade::MessageType type, const uint8_t* payload, uint8_t length);
 

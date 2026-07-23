@@ -24,7 +24,7 @@ LED refresh rate.
 | ---: | --- | --- | --- |
 | `0x01` | `PING` | empty | `uptime_ms:u32` |
 | `0x02` | `INFO` | empty | `fw_major, fw_minor, fw_patch, hw_rev, node_id, capabilities:u16` |
-| `0x03` | `STATUS` | empty | `uptime_ms:u32, reset_cause, calibrated, event_depth, last_scan_ms:u16, rx_good:u16, rx_bad:u16, event_overflow:u16, supply_mv:u16` |
+| `0x03` | `STATUS` | empty | `uptime_ms:u32, reset_cause, calibrated, event_depth, last_scan_ms:u16, rx_good:u16, rx_bad:u16, event_overflow:u16, supply_mv:u16, calibration_phase, calibration_percent` — phase: 0 never calibrated, 1 sampling, 2 last run ok, 3 last run failed (payload ≥ 19 bytes implies the phase extension) |
 | `0x05` | `CONFIG_GET` | optional `key` (`0` means all) | repeated `key, value:u16`; see keys below |
 | `0x06` | `CONFIG_SET` | repeated `key, value:u16` | effective repeated values; persisted with CRC |
 | `0x20` | `POLL_EVENTS` | `max_events` | zero to eight event records: `count`, then repeated `local_square, state, raw_adc:u16, at_ms:u32` |

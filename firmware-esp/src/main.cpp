@@ -60,6 +60,22 @@ void fwResponse(uint8_t node, arcade::MessageType type, bool ok,
                 const uint8_t* payload, uint8_t length) {
   flasher.onFwResponse(node, type, ok, payload, length);
 }
+
+void busTrace(const char* direction, uint8_t node, uint8_t sequence,
+              arcade::MessageType type, const char* result,
+              const uint8_t* payload, uint8_t length) {
+  network.publishBusTrace(direction, node, sequence, type, result, payload, length);
+}
+
+void calibrationProgress(uint8_t node, uint8_t percent) {
+  network.publishCalibrationProgress(node, percent);
+}
+
+void calibrationResult(uint8_t node, bool ok, const char* reason) {
+  Serial.printf("calibration result: node=%u ok=%u%s%s\n", node, ok,
+                reason ? " reason=" : "", reason ? reason : "");
+  network.publishCalibrationResult(node, ok, reason);
+}
 }
 
 void setup() {
@@ -80,6 +96,9 @@ void setup() {
   callbacks.nodePresenceChanged = nodePresenceChanged;
   callbacks.nodeStatusChanged = nodeStatusChanged;
   callbacks.fwResponse = fwResponse;
+  callbacks.busTrace = busTrace;
+  callbacks.calibrationProgress = calibrationProgress;
+  callbacks.calibrationResult = calibrationResult;
   bus.begin(Serial2, callbacks);
   flasher.begin(bus, Serial2);
   network.begin(config, bus);
