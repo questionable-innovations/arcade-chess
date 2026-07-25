@@ -1,0 +1,8 @@
+.git
+frontend/node_modules
+frontend/.svelte-kit
+frontend/build
+server/target
+firmware-*/.pio
+docs/*.pdf
+.DS_Store

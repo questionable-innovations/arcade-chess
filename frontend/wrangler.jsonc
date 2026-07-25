@@ -1,0 +1,12 @@
+{
+	// Cloudflare Workers static-assets deploy for the bring-up frontend.
+	// Custom domain: chess.qinnovate.nz — attach it in the Workers dashboard
+	// (Settings -> Domains & Routes -> Add custom domain) or as a route so the
+	// deployed worker is served there. Backend lives at chess-be.qinnovate.nz.
+	"name": "chess-frontend",
+	"compatibility_date": "2026-07-01",
+	"assets": {
+		"directory": "build",
+		"not_found_handling": "single-page-application"
+	}
+}

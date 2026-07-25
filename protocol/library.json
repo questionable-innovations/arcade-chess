@@ -1,0 +1,8 @@
+{
+  "name": "ArcadeProtocol",
+  "version": "0.1.0",
+  "description": "Bounded COBS/CRC protocol shared by Arcade Chess controllers",
+  "build": { "includeDir": "include", "srcDir": "src" },
+  "frameworks": "*",
+  "platforms": "*"
+}
