@@ -29,8 +29,10 @@ bool BusManager::beginFirmwareHandoffAll(uint8_t leader, uint8_t target_mask,
 
   // A normal poll may be in flight because polling is intentionally continuous.
   // Finish that one bounded transaction, then reserve the idle bus before the
-  // scheduler can launch another.
-  const uint32_t idle_deadline = millis() + 30;
+  // scheduler can launch another. The budget must outlast a whole response or a
+  // silent node's request is still pending here and the staged image is thrown
+  // away with "handoff rejected (bus busy?)".
+  const uint32_t idle_deadline = millis() + kResponseTimeoutMs + 10;
   while (pending_ && static_cast<int32_t>(millis() - idle_deadline) < 0) {
     const uint32_t now = millis();
     receive(now);
@@ -38,7 +40,9 @@ bool BusManager::beginFirmwareHandoffAll(uint8_t leader, uint8_t target_mask,
       handleTimeout(now);
     if (pending_) delay(1);
   }
-  if (pending_) return false;
+  // Budget exhausted with a reply still outstanding: retire it rather than lose
+  // the image. Its node just misses one poll.
+  if (pending_) handleTimeout(millis());
 
   uint8_t begin[kMaintenanceBeginBytes];
   begin[0] = arcade::kBroadcastAddress;

@@ -3,6 +3,20 @@
 #include "bringup_config.h"
 
 namespace quadrant {
+namespace {
+
+// Sweeps a fading comet head over one strip so every pixel and channel gets
+// exercised in turn.
+void attractComet(CRGB* pixels, uint8_t count, uint8_t head, uint8_t hue) {
+  fill_solid(pixels, count, CRGB::Black);
+  for (uint8_t tail = 0; tail <= bringup::kAttractCometTail; ++tail) {
+    const uint8_t index = static_cast<uint8_t>((head + count - tail) % count);
+    pixels[index] = CHSV(static_cast<uint8_t>(hue + index * 8), 255,
+                         static_cast<uint8_t>(255U >> tail));
+  }
+}
+
+}  // namespace
 
 Lighting::Lighting(Settings& settings, Sensors& sensors)
     : settings_(settings), sensors_(sensors) {}
@@ -64,15 +78,54 @@ void Lighting::render(uint32_t now_ms) {
   FastLED.show();
 }
 
+bool Lighting::attractActive(uint32_t now_ms) const {
+  return static_cast<int32_t>(now_ms - last_bus_activity_ms_) >=
+         static_cast<int32_t>(bringup::kBusIdleAttractMs);
+}
+
+void Lighting::renderAttract() {
+  ++attract_step_;
+  const uint8_t hue = static_cast<uint8_t>(attract_step_ * bringup::kAttractHueStep);
+  // Both strip lengths divide 256, so the uint8_t counter wraps in step.
+  const uint8_t square_head =
+      static_cast<uint8_t>(attract_step_ % bringup::kSquareStripPixels);
+  const uint8_t edge_head =
+      static_cast<uint8_t>(attract_step_ % bringup::kEdgeStripPixels);
+  // The complementary hue keeps the paired strips visually distinguishable.
+  attractComet(primary_, bringup::kSquareStripPixels, square_head, hue);
+  attractComet(secondary_, bringup::kSquareStripPixels, square_head,
+               static_cast<uint8_t>(hue + 128));
+  attractComet(edge_a_, bringup::kEdgeStripPixels, edge_head, hue);
+  attractComet(edge_b_, bringup::kEdgeStripPixels, edge_head,
+               static_cast<uint8_t>(hue + 128));
+  // Overlay live sensor hits so squares stay testable without an ESP attached.
+  for (uint8_t square = 0; square < arcade::kSquaresPerQuadrant; ++square) {
+    if (sensors_.state(square) == arcade::SensorState::kPositive) {
+      setSquare(square, rgb565(settings_.positive_rgb565));
+    } else if (sensors_.state(square) == arcade::SensorState::kNegative) {
+      setSquare(square, rgb565(settings_.negative_rgb565));
+    }
+  }
+  // Safe to mask interrupts here: the bus has been silent for seconds, and a
+  // frame arriving mid-show only costs the ESP one retry before attract stops.
+  FastLED.show();
+}
+
 void Lighting::tick(uint32_t now_ms) {
   if (override_until_ms_ && static_cast<int32_t>(now_ms - override_until_ms_) >= 0) {
     override_mask_ = 0;
     override_until_ms_ = 0;
   }
-  if (!render_requested_ || static_cast<int32_t>(now_ms - next_frame_ms_) < 0) return;
+  const bool attract = attractActive(now_ms);
+  if (!attract && !render_requested_) return;
+  if (static_cast<int32_t>(now_ms - next_frame_ms_) < 0) return;
   render_requested_ = false;
   next_frame_ms_ = now_ms + (1000U / bringup::kLedFramesPerSecond);
-  render(now_ms);
+  if (attract) {
+    renderAttract();
+  } else {
+    render(now_ms);
+  }
 }
 
 void Lighting::setSquares(uint16_t mask, uint8_t red, uint8_t green, uint8_t blue,

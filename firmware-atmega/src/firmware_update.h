@@ -29,6 +29,9 @@ class FirmwareUpdate {
   Sensors& sensors_;
   Lighting& lighting_;
   UpdateMarker marker_{};
+  // Why the last broadcast FW_PREPARE was refused (0 = accepted). Broadcasts get
+  // no reply, so this is the only channel; FW_PREFLIGHT reports it.
+  uint8_t broadcast_refusal_ = 0;
   bool reset_pending_ = false;
   bool bootloader_responder_ = true;
   bool maintenance_active_ = false;

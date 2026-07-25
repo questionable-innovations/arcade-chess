@@ -12,7 +12,7 @@ constexpr uint8_t kMaintenanceTargetOffset = 0;
 constexpr uint8_t kMaintenanceTokenOffset = 1;
 constexpr uint8_t kMaintenanceLeaseOffset = 5;
 constexpr uint8_t kTokenBytes = sizeof(uint32_t);
-constexpr uint8_t kPreflightBytes = 18;
+constexpr uint8_t kPreflightBytes = 19;
 constexpr uint8_t kPreflightNodeOffset = 0;
 constexpr uint8_t kPreflightFuseOffset = 1;
 constexpr uint8_t kPreflightBootloaderOffset = 2;
@@ -23,6 +23,7 @@ constexpr uint8_t kPreflightApplicationLimitOffset = 10;
 constexpr uint8_t kPreflightStateOffset = 14;
 constexpr uint8_t kPreflightResetCauseOffset = 15;
 constexpr uint8_t kPreflightSupplyMvOffset = 16;
+constexpr uint8_t kPreflightBroadcastRefusalOffset = 18;
 constexpr uint8_t kPrepareBytes = 16;
 constexpr uint8_t kPrepareTokenOffset = 0;
 constexpr uint8_t kPrepareUpdateIdOffset = 4;
@@ -84,6 +85,7 @@ bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
     maintenance_active_ = (maintenance_target_ < arcade::kQuadrantCount ||
                            maintenance_target_ == arcade::kBroadcastAddress) &&
                           maintenance_token_ != 0;
+    broadcast_refusal_ = 0;  // per-attempt; a stale code would misdirect the next
     return true;
   }
   if (request.type == arcade::MessageType::kFwPrepare &&
@@ -92,10 +94,19 @@ bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
     const uint32_t token = arcade::getU32(request.payload + kPrepareTokenOffset);
     const uint32_t image_size =
         arcade::getU32(request.payload + kPrepareImageSizeOffset);
-    if (!system_info::residentBootloaderEnabled() || !token ||
-        token != maintenance_token_ || !image_size ||
-        image_size > arcade::kAvrApplicationLimit || sensors_.calibrating() ||
-        sensors_.rawCaptureBusy()) return true;
+    // A broadcast carries no response, so a refusal here is invisible on the bus
+    // and surfaces ~10 s later as a bootloader sync timeout that points at the
+    // baud rate rather than at whatever actually refused. Latch the same code the
+    // addressed path returns; FW_PREFLIGHT reports it.
+    if (!system_info::residentBootloaderEnabled()) broadcast_refusal_ = 6;
+    else if (!token || token != maintenance_token_) broadcast_refusal_ = 8;
+    else if (!image_size || image_size > arcade::kAvrApplicationLimit)
+      broadcast_refusal_ = 9;
+    else if (sensors_.calibrating()) broadcast_refusal_ = 10;
+    else if (sensors_.rawCaptureSampling()) broadcast_refusal_ = 11;
+    else broadcast_refusal_ = 0;
+    if (broadcast_refusal_) return true;
+    sensors_.abortRawCapture();
     marker_.state = UpdateState::kRequested;
     marker_.node_id = identity_.node_id;
     marker_.token = token;
@@ -154,6 +165,7 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
       response.payload[kPreflightResetCauseOffset] = system_info::resetCause();
       arcade::putU16(response.payload + kPreflightSupplyMvOffset,
                      system_info::supplyMillivolts());
+      response.payload[kPreflightBroadcastRefusalOffset] = broadcast_refusal_;
       response.payload_length = kPreflightBytes;
       return true;
 
@@ -165,11 +177,18 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
       }
       const uint32_t token = arcade::getU32(request.payload + kPrepareTokenOffset);
       const uint32_t image_size = arcade::getU32(request.payload + kPrepareImageSizeOffset);
-      if (!token || token != maintenance_token_ || !image_size ||
-          image_size > arcade::kAvrApplicationLimit ||
-          sensors_.calibrating() || sensors_.rawCaptureBusy()) {
-        error_code = 3; return true;
+      // Distinct codes: a single "busy" hides which precondition actually failed,
+      // and the ESP has no other way to see this node's sensor state.
+      if (!token || token != maintenance_token_) { error_code = 8; return true; }
+      if (!image_size || image_size > arcade::kAvrApplicationLimit) {
+        error_code = 9; return true;
       }
+      if (sensors_.calibrating()) { error_code = 10; return true; }
+      // Refuse only while the ADC is mid-sweep. A finished capture is discarded:
+      // its response is worthless across the reboot into the bootloader, and an
+      // unclaimed one would otherwise veto every future update.
+      if (sensors_.rawCaptureSampling()) { error_code = 11; return true; }
+      sensors_.abortRawCapture();
       marker_.state = UpdateState::kRequested;
       marker_.node_id = identity_.node_id;
       marker_.token = token;

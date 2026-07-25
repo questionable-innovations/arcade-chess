@@ -31,10 +31,11 @@ class Sensors {
   uint8_t calibrationPhaseCode() const;
   bool startRawCapture(uint8_t samples);
   bool rawCaptureReady() const { return raw_capture_ready_; }
-  bool rawCaptureBusy() const { return raw_capture_active_ || raw_capture_ready_; }
+  bool rawCaptureSampling() const { return raw_capture_active_; }
   uint8_t rawCaptureSamples() const { return raw_capture_count_; }
   uint16_t rawCaptureValue(uint8_t square) const { return raw_capture_average_[square]; }
   void consumeRawCapture() { raw_capture_ready_ = false; }
+  void abortRawCapture() { raw_capture_active_ = false; raw_capture_ready_ = false; }
   uint16_t raw(uint8_t square) const { return raw_[square]; }
   uint8_t noise(uint8_t square) const { return settings_.noise[square]; }
   arcade::SensorState state(uint8_t square) const { return state_[square]; }

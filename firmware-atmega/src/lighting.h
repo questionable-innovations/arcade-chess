@@ -21,12 +21,15 @@ class Lighting {
   void identify(uint16_t duration_ms, uint32_t now_ms);
   void setBrightness(uint8_t brightness);
   void shutdownNow();
+  void noteBusActivity(uint32_t now_ms) { last_bus_activity_ms_ = now_ms; }
   uint16_t overrideMask() const { return override_mask_; }
 
  private:
   CRGB rgb565(uint16_t value) const;
   void setSquare(uint8_t square, const CRGB& colour);
   void render(uint32_t now_ms);
+  void renderAttract();
+  bool attractActive(uint32_t now_ms) const;
 
   Settings& settings_;
   Sensors& sensors_;
@@ -41,6 +44,8 @@ class Lighting {
   uint32_t override_until_ms_ = 0;
   uint32_t identify_until_ms_ = 0;
   uint32_t next_frame_ms_ = 0;
+  uint32_t last_bus_activity_ms_ = 0;
+  uint8_t attract_step_ = 0;
   bool render_requested_ = false;
 };
 

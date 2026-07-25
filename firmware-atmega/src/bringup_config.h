@@ -24,6 +24,12 @@ constexpr uint8_t kPixelsPerSquare = 2;
 constexpr uint8_t kSquareStripPixels = arcade::kSquaresPerQuadrant * kPixelsPerSquare;
 constexpr uint8_t kEdgeStripPixels = 8;
 constexpr uint16_t kIdentifyBlinkMs = 180;
+// With no ESP on the bus nothing ever opens a render window, so the strips would
+// stay dark on an otherwise healthy node. After this much bus silence the
+// quadrant self-drives a sweep across every pixel instead.
+constexpr uint16_t kBusIdleAttractMs = 3000;
+constexpr uint8_t kAttractCometTail = 3;
+constexpr uint8_t kAttractHueStep = 3;
 constexpr uint8_t kIdentifyRed = 255;
 constexpr uint8_t kIdentifyGreen = 72;
 constexpr uint8_t kIdentifyBlue = 0;

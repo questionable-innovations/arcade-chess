@@ -48,6 +48,12 @@ struct BusCallbacks {
 
 class BusManager {
  public:
+  // A snapshot reply is ~60 encoded bytes = 16 ms of wire time at 38400, on top
+  // of the request and the node's scan-loop latency; 20 ms timed out every one
+  // while the reply was still arriving. Covers the largest polled response.
+  // Public because any code that drains the bus must outwait a whole response.
+  static constexpr uint32_t kResponseTimeoutMs = 50;
+
   void begin(HardwareSerial& serial, BusCallbacks callbacks);
   void tick(uint32_t now_ms);
   bool enqueue(uint8_t node, arcade::MessageType type, const uint8_t* payload,
@@ -83,6 +89,10 @@ class BusManager {
   uint8_t onlineCount() const;
   uint8_t rawTargetMask() const { return raw_target_mask_; }
   uint8_t rawResponseMask() const { return raw_response_mask_; }
+  bool rawActive() const { return raw_active_; }
+  // Held for the duration of a firmware upload: a raw sweep starting mid-stream
+  // makes beginFirmwareHandoff() reject after the whole image has been staged.
+  void setRawScansBlocked(bool blocked) { raw_scans_blocked_ = blocked; }
   uint32_t goodFrames() const { return good_frames_; }
   uint32_t badFrames() const { return bad_frames_; }
   uint32_t timeoutCount() const { return timeout_count_; }
@@ -142,6 +152,7 @@ class BusManager {
   uint32_t bad_frames_ = 0;
   uint32_t timeout_count_ = 0;
   bool raw_active_ = false;
+  bool raw_scans_blocked_ = false;
   uint8_t raw_samples_ = 1;
   uint8_t raw_next_node_ = 0;
   uint8_t raw_target_mask_ = 0;

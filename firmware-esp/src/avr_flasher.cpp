@@ -7,9 +7,13 @@ namespace {
 constexpr uint32_t kAppLimit = arcade::kAvrApplicationLimit;
 constexpr uint16_t kPageSize = arcade::kAvrFlashPageBytes;
 constexpr uint32_t kBusBaud = arcade::kBusBaud;
-// Must match board_bootloader.speed in firmware-atmega/platformio.ini. If sync
-// proves unreliable on the diode-OR return at this rate, rebuild urboot slower.
-constexpr uint32_t kBootloaderBaud = 115200;
+// Urboot autobauds, but it can only pick a UBRR divisor: on the 8 MHz internal
+// RC the closest divisor for 115200 is 111111 (-3.6%), past the UART's tolerance
+// before the RC's own error is counted. 76800 quantises to +0.16% (UBRR=12), the
+// same margin as the 38400 bus rate, and halves the programming time. Going
+// faster is limited by the return path, not the divisor: quadrant TXD reaches
+// the ESP through D8 with only R1=10k pulling up, so rising edges take ~1us.
+constexpr uint32_t kBootloaderBaud = 76800;
 // This provisioned urboot u8.0 build encodes its MCU/features in response bytes.
 constexpr uint8_t kUrInSync = 0xe0;
 constexpr uint8_t kUrOk = 0x78;
@@ -112,6 +116,11 @@ bool AvrFlasher::beginReceive(uint8_t node, uint8_t target_mask,
     return false;
   }
   memset(image_, 0xff, kAppLimit);
+  // A raw sweep starting while the hex streams makes beginFirmwareHandoff()
+  // reject at finishReceive(), after the whole image has been staged. Hold them
+  // off now; an already-running sweep is bounded and drains during the stream.
+  bus_->setRawScansBlocked(true);
+  if (bus_->rawActive()) Serial.println(F("waiting out an in-flight raw scan"));
   node_ = node;
   target_mask_ = target_mask;
   confirmed_mask_ = 0;
@@ -233,6 +242,7 @@ void AvrFlasher::tick(uint32_t now_ms) {
     case Phase::kAwaitHandoff:
       if (bus_->programmingHandoff()) {
         serial_->updateBaudRate(kBootloaderBaud);
+        bus_baud_switched_ = true;
         while (serial_->available()) serial_->read();
         phase_ = Phase::kSync;
         sync_attempts_ = 0;
@@ -252,6 +262,12 @@ void AvrFlasher::tick(uint32_t now_ms) {
         return;
       }
       if (++sync_attempts_ >= kMaximumSyncAttempts) {
+        // The broadcast prepare is unacknowledged, so a node that refused looks
+        // identical to a baud problem from here. Point at the one place that knows.
+        if (simultaneous_) {
+          Serial.println(F("hint: run fw-preflight <node> and read "
+                           "last_broadcast_refusal before suspecting the baud rate"));
+        }
         fail("bootloader sync timeout"); return;
       }
       deadline_ms_ = now_ms + kBootResetDelayMs;
@@ -327,8 +343,13 @@ void AvrFlasher::onFwResponse(uint8_t node, arcade::MessageType type, bool ok,
   if (phase_ == Phase::kAwaitHandoff && !ok &&
       (type == arcade::MessageType::kFwPrepare ||
        type == arcade::MessageType::kFwEnterBootloader)) {
-    fail(type == arcade::MessageType::kFwPrepare ? "prepare rejected"
-                                                 : "enter rejected");
+    // Error frames carry [0]=request type, [1]=node error code; without the code
+    // "rejected" cannot be told apart from a lost maintenance lease.
+    char detail[48];
+    snprintf(detail, sizeof(detail), "%s rejected code=%u",
+             type == arcade::MessageType::kFwPrepare ? "prepare" : "enter",
+             length >= 2 ? payload[1] : 0);
+    fail(detail);
     return;
   }
   if (phase_ == Phase::kHealth && type == arcade::MessageType::kFwHealth) {
@@ -376,6 +397,7 @@ void AvrFlasher::finishSuccess() {
   Serial.printf("FLASH OK nodes=0x%02x size=%u crc32=0x%08x pages=%u elapsed_ms=%lu\n",
                 target_mask_, image_size_, image_crc32_, page_count_,
                 millis() - started_ms_);
+  bus_->setRawScansBlocked(false);
   free(image_);
   image_ = nullptr;
   phase_ = Phase::kIdle;
@@ -384,7 +406,8 @@ void AvrFlasher::finishSuccess() {
 void AvrFlasher::fail(const char* reason) {
   Serial.printf("FLASH FAIL node=%u phase=%u reason=%s\n", node_,
                 static_cast<unsigned>(phase_), reason);
-  if (bus_->programmingHandoff()) restoreBusBaud();
+  bus_->setRawScansBlocked(false);
+  if (bus_baud_switched_) restoreBusBaud();
   if (phase_ >= Phase::kAwaitHandoff) {
     // Ends the quiet lease for the other quadrants even when bootloader entry
     // was never acknowledged; the target's urboot times out back to whatever
@@ -400,6 +423,7 @@ void AvrFlasher::restoreBusBaud() {
   serial_->flush();
   serial_->updateBaudRate(kBusBaud);
   while (serial_->available()) serial_->read();
+  bus_baud_switched_ = false;
 }
 
 bool AvrFlasher::urCommand(const uint8_t* request, size_t request_length,

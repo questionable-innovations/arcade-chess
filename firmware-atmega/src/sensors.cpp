@@ -88,16 +88,32 @@ void Sensors::completeScan(uint32_t now_ms) {
     if (++calibration_scans_ >= bringup::kCalibrationScans) {
       calibration_ok_ = true;
       for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
-        const uint16_t range = calibration_max_[i] - calibration_min_[i];
-        settings_.baseline[i] = static_cast<uint16_t>(
+        const uint16_t baseline = static_cast<uint16_t>(
             calibration_sum_[i] / calibration_scans_);
-        settings_.noise[i] = range > 255 ? 255 : static_cast<uint8_t>(range);
-        if (settings_.baseline[i] < bringup::kMinimumCalibrationBaseline ||
-            settings_.baseline[i] > bringup::kMaximumCalibrationBaseline ||
-            range > bringup::kMaximumCalibrationNoise) calibration_ok_ = false;
+        const uint16_t range = calibration_max_[i] - calibration_min_[i];
+        if (baseline < bringup::kMinimumCalibrationBaseline ||
+            baseline > bringup::kMaximumCalibrationBaseline ||
+            range > bringup::kMaximumCalibrationNoise) {
+          calibration_ok_ = false;
+          break;
+        }
       }
-      settings_.calibrated = calibration_ok_ ? 1 : 0;
-      if (calibration_ok_) saveSettings(settings_);
+      // Validate before committing: settings_ is shared with ProtocolService, so
+      // a rejected run's baselines would blank the fault out of the raw-scan
+      // heatmap (raw - baseline == 0 on a pinned square) and would be persisted
+      // by the next unrelated saveSettings() from a brightness/config command.
+      // A failed run leaves the previous good calibration in force; the failure
+      // is reported through calibrationPhaseCode() instead.
+      if (calibration_ok_) {
+        for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+          const uint16_t range = calibration_max_[i] - calibration_min_[i];
+          settings_.baseline[i] = static_cast<uint16_t>(
+              calibration_sum_[i] / calibration_scans_);
+          settings_.noise[i] = range > 255 ? 255 : static_cast<uint8_t>(range);
+        }
+        settings_.calibrated = 1;
+        saveSettings(settings_);
+      }
       calibration_active_ = false;
       calibration_finished_ = true;
       calibration_has_result_ = true;

@@ -88,7 +88,11 @@ void NetworkManager::tick(uint32_t now_ms) {
   if (raw_stream_enabled_ && (!raw_stream_until_ms_ ||
       static_cast<int32_t>(raw_stream_until_ms_ - now_ms) > 0) &&
       static_cast<int32_t>(now_ms - next_raw_stream_ms_) >= 0) {
-    if (bus_->requestRawScan(raw_stream_samples_)) next_raw_stream_ms_ = now_ms + raw_stream_interval_ms_;
+    // Advance unconditionally. Re-arming only on success meant a sweep that
+    // outlasted the interval retried every loop pass, holding raw_active_ true
+    // back to back — which starves all node polling and blocks firmware uploads.
+    bus_->requestRawScan(raw_stream_samples_);
+    next_raw_stream_ms_ = now_ms + raw_stream_interval_ms_;
   } else if (raw_stream_until_ms_ && static_cast<int32_t>(now_ms - raw_stream_until_ms_) >= 0) {
     raw_stream_enabled_ = false;
   }

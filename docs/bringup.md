@@ -116,8 +116,18 @@ Close any open serial monitor first; the script owns the port. The full sequence
 per target is: `MAINTENANCE_BEGIN` broadcast (non-targets suppress responses),
 `FW_PREPARE` (CRC-protected EEPROM marker), `FW_ENTER_BOOTLOADER` (direct validated
 handoff into Urboot), Urprotocol sync and page programming with complete readback verification
-at the 115200 bootloader baud, `MAINTENANCE_END`, then an `FW_HEALTH` check of the
+at the 76800 bootloader baud, `MAINTENANCE_END`, then an `FW_HEALTH` check of the
 rebooted application and an acknowledged `FW_CONFIRM` that marks the image valid.
+
+76800 is used rather than 115200 because the quadrants run the 8 MHz internal RC:
+115200 is unreachable by any UBRR divisor there (closest is 111111, −3.6%), while
+76800 quantises to +0.16% with U2X. Urboot autobauds onto either.
+
+A raw scan in flight blocks the handoff, so `fw-flash` holds off new raw sweeps for
+the duration of the upload. If a flash still fails with `handoff rejected (bus
+busy?)`, check `status` for `busy=0`. `prepare rejected code=N` names the node-side
+blocker (see `docs/uart-api.md`); for `fw-flash-all`, whose broadcasts get no reply,
+read `last_broadcast_refusal` from `fw-preflight <node>` instead.
 Success is only reported after readback, health, and confirmation all pass.
 
 The bus runs at 38,400 baud but the installed Urboot build autobauds, so the

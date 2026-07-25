@@ -37,7 +37,7 @@ LED refresh rate.
 | `0x43` | `CLEAR_LIGHTING` | optional `mask:u16`; empty means all | cleared mask |
 | `0x44` | `RENDER_WINDOW` | broadcast, empty | no response; all quadrants render concurrently and ESP keeps the bus quiet for 4 ms |
 | `0x50` | `SET_DEBUG` | `flags, raw_interval_ms:u16` | effective values |
-| `0x60` | `FW_PREFLIGHT` | empty | `node, high_fuse, bootloader_enabled, handoff_version, page_size:u16, flash_size:u32, app_limit:u32, marker_state, reset_cause, supply_mv:u16` |
+| `0x60` | `FW_PREFLIGHT` | empty | `node, high_fuse, bootloader_enabled, handoff_version, page_size:u16, flash_size:u32, app_limit:u32, marker_state, reset_cause, supply_mv:u16, last_broadcast_refusal` |
 | `0x61` | `MAINTENANCE_BEGIN` | broadcast: `target, token:u32, lease_ms:u16`; target `0xFF` means all | no response; non-target nodes suppress responses |
 | `0x62` | `FW_PREPARE` | addressed or all-node broadcast: `token:u32, update_id:u32, image_size:u32, image_crc32:u32` | addressed form echoes `token, update_id`; metadata is persisted before ACK/no-response continuation |
 | `0x63` | `FW_ENTER_BOOTLOADER` | addressed: `token:u32, update_id:u32`; all-node broadcast appends `leader, target_mask` | addressed form echoes values; then LED shutdown and direct protected-boot handoff |
@@ -61,6 +61,13 @@ Those colours, thresholds, hysteresis, debounce count, brightness, scan interval
 and local-to-global coordinate map are configuration rather than protocol
 constants. Explicit lighting commands temporarily override the settled-piece base
 layer and expire using `duration_ms`; zero means persist until cleared.
+
+Rendering is normally driven by the ESP's `RENDER_WINDOW` broadcast, so a node
+with no ESP on the bus would otherwise sit dark. After three seconds without a
+single inbound byte a live quadrant self-drives an attract animation: a rainbow
+comet sweeps every square and edge pixel, with live sensor hits drawn over it so
+squares stay testable standalone. The first inbound byte stops it and normal
+render-window pacing resumes.
 
 Configuration keys are enter threshold `1` (ADC counts), exit threshold `2`,
 debounce scans `3`, mux settling microseconds `4`, full scan target milliseconds
@@ -90,7 +97,12 @@ tuned from the ESP serial console without recompiling.
 An error response sets response+error flags, uses type `0x0f`, and contains
 `request_type, code`. Codes are `1` malformed payload, `2` unsupported message,
 `3` busy, `4` not calibrated, `5` invalid configuration, `6` resident bootloader
-missing, `7` maintenance lease missing, and `8` token/update mismatch. Parsers count all
+missing, `7` maintenance lease missing, and `8` token/update mismatch. Preconditions
+that would otherwise collapse into `3` name the specific blocker: `9` image size out
+of range, `10` calibration in progress, `11` raw capture in progress, and `12` a raw
+response is already outstanding. A broadcast `FW_PREPARE` cannot reply, so a node
+that refuses one latches the same code in `FW_PREFLIGHT`'s `last_broadcast_refusal`
+(`0` = accepted); it is cleared by each `MAINTENANCE_BEGIN`. Parsers count all
 bad COBS, length, version, CRC, and destination failures; counters saturate rather
 than wrapping.
 

@@ -57,6 +57,10 @@ class AvrFlasher {
   uint8_t target_mask_ = 0;
   uint8_t confirmed_mask_ = 0;
   bool simultaneous_ = false;
+  // The flasher owns the Serial2 baud switch, so it must own the undo too:
+  // gating it on BusManager's handoff flag missed every path where that flag was
+  // already cleared, stranding the whole bus at the bootloader baud.
+  bool bus_baud_switched_ = false;
   uint8_t* image_ = nullptr;
   uint32_t image_size_ = 0;
   uint32_t image_crc32_ = 0;

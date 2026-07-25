@@ -6,7 +6,6 @@ namespace {
 constexpr uint8_t kBusRxPin = 17;
 constexpr uint8_t kBusTxPin = 16;
 constexpr uint32_t kBusBaud = arcade::kBusBaud;
-constexpr uint32_t kResponseTimeoutMs = 20;
 constexpr uint32_t kOnlinePollIntervalMs = 10;
 constexpr uint32_t kOfflineProbeBaseMs = 1000;
 constexpr uint32_t kOfflineProbeMaximumMs = 10000;
@@ -38,7 +37,10 @@ constexpr uint8_t kRawHeaderBytes = 3;
 constexpr uint8_t kRawSquareBytes = 6;
 constexpr uint8_t kRawPayloadBytes =
     kRawHeaderBytes + arcade::kSquaresPerQuadrant * kRawSquareBytes;
+// Minimum stays 18 so a node still running pre-refusal-byte firmware — exactly
+// the node you are trying to update — still parses.
 constexpr uint8_t kPreflightPayloadBytes = 18;
+constexpr uint8_t kPreflightBroadcastRefusalOffset = 18;
 constexpr uint8_t kPreflightFuseOffset = 1;
 constexpr uint8_t kPreflightBootloaderOffset = 2;
 constexpr uint8_t kPreflightProtocolOffset = 3;
@@ -85,7 +87,7 @@ bool BusManager::enqueue(uint8_t node, arcade::MessageType type,
 }
 
 bool BusManager::requestRawScan(uint8_t samples, const char* correlation) {
-  if (raw_active_ || !onlineMask()) return false;
+  if (raw_active_ || raw_scans_blocked_ || !onlineMask()) return false;
   raw_active_ = true;
   raw_samples_ = constrain(samples, 1, arcade::kMaximumRawCaptureScans);
   raw_next_node_ = 0;
@@ -250,7 +252,16 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     if (callbacks_.nodePresenceChanged) callbacks_.nodePresenceChanged(frame.source, true);
   }
   bool ok = !(frame.flags & arcade::kError);
-  const char* reason = ok ? nullptr : "node_error";
+  // An error payload is [request type, node error code]; a bare "node_error"
+  // hid which precondition failed, and the codes (docs/uart-api.md) are the only
+  // way to tell "calibrating" from "busy" or a lost maintenance lease.
+  char error_reason[24];
+  const char* reason = nullptr;
+  if (!ok) {
+    snprintf(error_reason, sizeof(error_reason), "node_error_%u",
+             frame.payload_length >= 2 ? frame.payload[1] : 0);
+    reason = error_reason;
+  }
   if (callbacks_.busTrace) {
     callbacks_.busTrace("rx", frame.source, frame.sequence, frame.type,
                         ok ? "ok" : "error", frame.payload,
@@ -335,7 +346,7 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     }
   } else if (ok && pending_type_ == arcade::MessageType::kFwPreflight &&
              frame.payload_length >= kPreflightPayloadBytes) {
-    Serial.printf("[%10u][I][FW] node=%u hfuse=0x%02x boot=%u handoff_v=%u page=%u flash=%u app_limit=%u marker=%u reset=0x%02x avcc=%u\n",
+    Serial.printf("[%10u][I][FW] node=%u hfuse=0x%02x boot=%u handoff_v=%u page=%u flash=%u app_limit=%u marker=%u reset=0x%02x avcc=%u last_broadcast_refusal=%u\n",
                   now_ms, frame.source, frame.payload[kPreflightFuseOffset],
                   frame.payload[kPreflightBootloaderOffset],
                   frame.payload[kPreflightProtocolOffset],
@@ -344,7 +355,9 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
                   arcade::getU32(frame.payload + kPreflightApplicationLimitOffset),
                   frame.payload[kPreflightStateOffset],
                   frame.payload[kPreflightResetCauseOffset],
-                  arcade::getU16(frame.payload + kPreflightSupplyMvOffset));
+                  arcade::getU16(frame.payload + kPreflightSupplyMvOffset),
+                  frame.payload_length > kPreflightBroadcastRefusalOffset
+                      ? frame.payload[kPreflightBroadcastRefusalOffset] : 0);
   } else if (ok && pending_type_ == arcade::MessageType::kFwEnterBootloader) {
     programming_handoff_ = true;
     Serial.printf("[%10u][I][FW] target=%u ACKed bootloader entry; framed polling stopped\n",
@@ -353,8 +366,9 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     // Error (busy/unsupported) or unexpected-type reply: the node's slot must
     // still complete, or the scheduler retries this node forever and starves
     // every other poll on the bus.
-    Serial.printf("[%10u][W][RAW] node=%u rejected raw scan type=0x%02x\n", now_ms,
-                  frame.source, static_cast<unsigned>(frame.type));
+    Serial.printf("[%10u][W][RAW] node=%u rejected raw scan type=0x%02x code=%u\n",
+                  now_ms, frame.source, static_cast<unsigned>(frame.type),
+                  frame.payload_length >= 2 ? frame.payload[1] : 0);
     raw_done_mask_ |= 1U << frame.source;
     finishRawIfReady();
   }
@@ -450,14 +464,24 @@ void BusManager::handleTimeout(uint32_t now_ms) {
 // reboot-time "2" from EEPROM never replays as a fresh completion.
 void BusManager::updateCalibration(uint8_t index, uint8_t phase, uint8_t percent,
                                    uint32_t now_ms) {
-  (void)now_ms;
   QuadrantState& node = nodes_[index];
   const uint8_t previous_phase = node.cal_phase;
   const uint8_t previous_percent = node.cal_percent;
   node.cal_phase = phase;
   node.cal_percent = percent;
   if (phase == 1) {
-    if (percent != previous_percent && callbacks_.calibrationProgress) {
+    // Adopt a run this ESP did not arm — a lost kCalibrate ACK, a restart inside
+    // the ~2 s run, or another client's request. Publishing progress without a
+    // watch would tell the UI "calibrating" and then discard the terminal phase
+    // below, leaving it latched with its per-node calibrate button disabled.
+    const bool adopted = !node.calibration_watch;
+    if (adopted) {
+      node.calibration_watch = true;
+      node.calibration_started_ms = now_ms;
+      node.calibration_deadline_ms = now_ms + kCalibrationWatchMs;
+      poll_count_[index] = 0;
+    }
+    if ((adopted || percent != previous_percent) && callbacks_.calibrationProgress) {
       callbacks_.calibrationProgress(index, percent);
     }
     return;
@@ -477,6 +501,9 @@ void BusManager::updateCalibration(uint8_t index, uint8_t phase, uint8_t percent
 }
 
 void BusManager::finishRawIfReady() {
+  // A late reply for a node whose slot was already retired by handleTimeout()
+  // reaches here after the sweep closed; without this the callback fires twice.
+  if (!raw_active_) return;
   if ((raw_done_mask_ & raw_target_mask_) != raw_target_mask_) return;
   raw_active_ = false;
   uint8_t valid_mask = 0;

@@ -23,6 +23,9 @@ void saturatingIncrement(uint16_t& value) {
 void ProtocolService::begin() { Serial.begin(bringup::kBusBaud); }
 
 void ProtocolService::tick() {
+  // Any inbound byte — frame, garbage, or flashing traffic — counts as an ESP
+  // being present, which suppresses the idle attract animation.
+  if (Serial.available()) lighting_.noteBusActivity(millis());
   while (Serial.available()) {
     arcade::Frame request{};
     const auto result = decoder_.push(static_cast<uint8_t>(Serial.read()), request);
@@ -185,9 +188,12 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       break;
     }
     case arcade::MessageType::kGetRawScan:
-      if (raw_response_pending_ || !sensors_.startRawCapture(
-          request.payload_length ? request.payload[0] : 1)) {
-        sendError(request, 3); return;
+      if (raw_response_pending_) { sendError(request, 12); return; }
+      // Belt and braces: only serviceRawResponse() consumes a finished capture,
+      // so an unclaimed one would refuse every later scan. Discard, never refuse.
+      if (sensors_.rawCaptureReady()) sensors_.consumeRawCapture();
+      if (!sensors_.startRawCapture(request.payload_length ? request.payload[0] : 1)) {
+        sendError(request, 11); return;
       }
       raw_request_ = request;
       raw_response_pending_ = true;
@@ -276,7 +282,14 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
 }
 
 void ProtocolService::serviceRawResponse() {
-  if (!raw_response_pending_ || !sensors_.rawCaptureReady()) return;
+  if (!raw_response_pending_) return;
+  if (!sensors_.rawCaptureReady()) {
+    // A firmware handoff calls abortRawCapture() underneath an in-flight request.
+    // Dropping it here is what clears the pending flag in that case; otherwise it
+    // latches and every later raw scan is refused with error 12.
+    if (!sensors_.rawCaptureSampling()) raw_response_pending_ = false;
+    return;
+  }
   auto response = makeResponse(raw_request_, arcade::MessageType::kRawScan);
   response.payload[0] = sensors_.rawCaptureSamples();
   arcade::putU16(response.payload + 1, system_info::supplyMillivolts());
