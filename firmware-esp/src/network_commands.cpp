@@ -21,7 +21,14 @@ void NetworkManager::sendResult(const char* id, const char* status, const char* 
   String json; serializeJson(doc, json); sendJson(json);
 }
 
-void NetworkManager::commandComplete(const char* id, bool ok, const char* reason) {
+void NetworkManager::commandComplete(const char* id, bool ok, const char* reason,
+                                     uint8_t node, uint8_t node_error_code) {
+  if (reason && !strcmp(reason, "node_error")) {
+    JsonDocument data;
+    data["node"] = node; data["code"] = node_error_code;
+    sendResult(id, "rejected", reason, data.as<JsonVariantConst>());
+    return;
+  }
   const bool rejected = !ok && reason && strcmp(reason, "timeout") != 0 &&
                         strcmp(reason, "partial_scan") != 0;
   sendResult(id, ok ? "applied" : (rejected ? "rejected" : "timeout"), reason);
@@ -98,6 +105,7 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
   } else if (!strcmp(name, "calibration.start")) {
     if (args["node"].is<const char*>() && !strcmp(args["node"], "all")) {
       const uint8_t online = bus_->onlineMask();
+      if (!online) { sendResult(id, "rejected", "no_nodes_online"); return; }
       int8_t last = -1;
       for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node)
         if (online & (1U << node)) last = node;
@@ -141,11 +149,39 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     accepted = bus_->setGlobalSquares(squares, count, colour >> 16, colour >> 8, colour,
                                       args["duration_ms"] | 0, id);
     if (!accepted) { sendResult(id, "rejected", "bus_queue_full"); return; }
-  } else if (!strcmp(name, "device.restart") &&
-             !strcmp(args["confirm"] | "", "restart")) {
+  } else if (!strcmp(name, "lighting.clear")) {
+    uint8_t squares[arcade::kBoardSquareCount]; size_t count = 0;
+    bool has_online_target = false;
+    if (args["squares"].is<JsonArrayConst>()) {
+      for (JsonVariantConst square : args["squares"].as<JsonArrayConst>()) {
+        if (!square.is<uint8_t>() || square.as<uint8_t>() >= arcade::kBoardSquareCount ||
+            count >= arcade::kBoardSquareCount) {
+          sendResult(id, "rejected", "invalid_args"); return;
+        }
+        squares[count++] = square.as<uint8_t>();
+        uint8_t node = 0, local = 0;
+        if (bus_->locateGlobal(squares[count - 1], node, local) && bus_->isOnline(node)) {
+          has_online_target = true;
+        }
+      }
+    } else if (!args["squares"].isNull()) {
+      sendResult(id, "rejected", "invalid_args"); return;
+    }
+    // An absent or empty list clears the whole board, so any online node is a target.
+    if (!count) has_online_target = bus_->onlineMask() != 0;
+    if (!has_online_target) { sendResult(id, "rejected", "target_node_offline"); return; }
+    accepted = bus_->clearGlobalSquares(squares, count, id);
+    if (!accepted) { sendResult(id, "rejected", "bus_queue_full"); return; }
+  } else if (!strcmp(name, "device.restart")) {
+    if (strcmp(args["confirm"] | "", "restart")) {
+      sendResult(id, "rejected", "confirmation_required"); return;
+    }
     sendResult(id, "accepted"); delay(kRestartFlushMs); ESP.restart();
+  } else {
+    sendResult(id, "rejected", "unsupported"); return;
   }
 
+  // A false `accepted` past here only ever means the bus queue would not take it.
   if (accepted) sendResult(id, "accepted");
-  else sendResult(id, "rejected", "invalid_args_or_busy");
+  else sendResult(id, "rejected", "busy");
 }

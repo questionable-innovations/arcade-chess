@@ -17,6 +17,7 @@
 		debug = false,
 		heatmap = false,
 		heatSpan = 512,
+		stale = null,
 		admin = false,
 		probeFlash = null,
 		onSquare
@@ -29,6 +30,8 @@
 		debug?: boolean;
 		heatmap?: boolean;
 		heatSpan?: number;
+		/** Why the rendered position can no longer be trusted; null when live. */
+		stale?: string | null;
 		admin?: boolean;
 		probeFlash?: number | null;
 		onSquare: (i: number) => void;
@@ -126,7 +129,7 @@
 		{#each ranks as r (r)}<span>{r}</span>{/each}
 	</div>
 
-	<div class="board" role="grid" aria-label="chess board sensor state">
+	<div class="board" class:stale={!!stale} role="grid" aria-label="chess board sensor state">
 		{#each cells as cell (cell.i)}
 			<button
 				class="sq {cell.dark ? 'dark' : 'light'} {squares[cell.i]}"
@@ -146,6 +149,14 @@
 				{#if !valid[cell.i]}<span class="flag" title="invalid reading"></span>{/if}
 			</button>
 		{/each}
+
+		{#if stale}
+			<!-- The last known position is still drawn, but never as if it were live. -->
+			<div class="stalemark" role="status">
+				<span class="word">STALE</span>
+				<span class="why">{stale}</span>
+			</div>
+		{/if}
 
 		{#if debug}
 			<!-- Quadrant seams + node badges surface the physical boards only here. -->
@@ -262,6 +273,40 @@
 		background:
 			linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.05)),
 			var(--color-uncertain);
+	}
+
+	/* Stale: the panel visibly goes cold so a frozen position can't read live. */
+	/* Filter the squares, not the board, so the marker itself stays legible. */
+	.board.stale .sq {
+		filter: saturate(0.25) brightness(0.72);
+	}
+	.stalemark {
+		position: absolute;
+		z-index: 4;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		display: flex;
+		align-items: baseline;
+		gap: 9px;
+		padding: 6px 14px;
+		font-family: var(--font-mono);
+		background: rgba(8, 9, 10, 0.82);
+		border: 1px dashed color-mix(in srgb, var(--color-fault) 60%, var(--color-line));
+		border-radius: 999px;
+		backdrop-filter: blur(4px);
+		pointer-events: none;
+	}
+	.stalemark .word {
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.18em;
+		color: var(--color-fault);
+	}
+	.stalemark .why {
+		font-size: 10px;
+		letter-spacing: 0.04em;
+		color: var(--color-fg-faint);
 	}
 
 	/* Graceful degradation in normal view: an offline quadrant simply dims. */

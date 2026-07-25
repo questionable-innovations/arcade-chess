@@ -48,6 +48,16 @@ full).
   corresponding device messages, or `null`.
 - `recent` is a bounded ring (newest last, at most 200 entries) of recent device
   event envelopes, for the debug ticker.
+- `node_events` is a bounded ring (newest last, at most 64) of quadrant
+  transitions, each `{ unix_ms, node, online, reset_cause, timeouts,
+  event_overflow }`. It exists to answer "why did node 2 drop off at 14:32"
+  after the fact, and is deliberately kept out of `recent`: an active bus trace
+  fills that ring in a few seconds and would evict the very history you want.
+  Only genuine transitions are recorded, not every poll.
+
+`init` also carries a `server` object — `{ oversized_dropped, device_count,
+uptime_ms }` — so counters the server keeps are visible somewhere other than its
+own stderr.
 
 ### `device.connected` / `device.disconnected`
 
@@ -67,9 +77,16 @@ Every device event is relayed verbatim inside this wrapper, in arrival order:
 {
   "type": "event",
   "device_id": "arcade-chess-001",
+  "recv_unix_ms": 1737000000000,
   "event": { "v": 1, "type": "sensor.changed", "seq": 18, "data": {} }
 }
 ```
+
+`recv_unix_ms` is the server's wall-clock receive time. It sits on the wrapper,
+never inside the envelope, so the device payload stays byte-for-byte verbatim.
+Device `at_ms` values are monotonic milliseconds since that board booted and
+cannot be compared against anything else; this is the anchor that lets a client
+render a real timestamp and correlate an event with a server log line.
 
 The `event` value is the unmodified device envelope from `websocket-api.md`
 (`board.snapshot`, `sensor.changed`, `node.status`, `device.status`,
@@ -96,8 +113,20 @@ forwarded to the device with the given correlation `id`; the terminal
 { "type": "error", "reason": "unauthorized" }
 ```
 
-Stable `reason` values: `unauthorized`, `unknown_device`, `device_offline`,
-`invalid_args`.
+Stable `reason` values for a rejected request: `unauthorized`, `unknown_device`,
+`device_offline`, `invalid_args`.
+
+The server also pushes unsolicited `error` messages to explain things it would
+otherwise do silently:
+
+| reason | meaning |
+| --- | --- |
+| `shed_slow_client` | this client's outbound queue stayed full; the connection is about to close |
+| `shed_lagged` | this client missed `dropped` broadcast events and cannot catch up; reconnect for a fresh `init` |
+| `unknown_event_type` | a device sent an event `type` the server does not recognise (`etype` names it) — normally a firmware/server version skew |
+
+A client that is shed should reconnect and rebuild from `init`; it must not
+assume its current state is still correct.
 
 ## Client → server messages
 
@@ -107,9 +136,11 @@ Stable `reason` values: `unauthorized`, `unknown_device`, `device_offline`,
 { "type": "auth", "password": "..." }
 ```
 
-Compared against the server's `ADMIN_PASSWORD` environment variable. On success
-the connection is marked admin until it closes. The server replies with
-`auth.result` either way and never echoes the password.
+Compared against the server's `ADMIN_PASSWORD` environment variable, in constant
+time. On success the connection is marked admin until it closes — a client that
+reconnects must re-authenticate. The server replies with `auth.result` either
+way and never echoes the password. Failures are logged, delayed, and capped: the
+fifth failed attempt on a connection closes it.
 
 ### `command` (admin only)
 

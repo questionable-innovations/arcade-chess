@@ -82,6 +82,32 @@ Fuse programming is recoverability-sensitive. Before changing clock source, set
 rebuild and re-provision every quadrant using the same Custom tasks. Do not select
 external until the 16 MHz crystals are fitted.
 
+### Update the application over ISP
+
+`tools/flash-isp.sh` is the fast path for iterating with a programmer attached.
+It skips the fuse pass, the EEPROM image, and the second PlatformIO project,
+leaving a single avrdude session that runs the ISP clock eight times faster than
+provisioning does:
+
+```sh
+# Build, then write whatever quadrant is on the programmer
+tools/flash-isp.sh --build
+
+# Same programmer defaults as provisioning; --bitclock/--port when needed
+tools/flash-isp.sh --programmer arduino-as-isp --port /dev/cu.usbserial-1130
+```
+
+Classic AVRs have no ISP page erase — only ATxmega and UPDI parts do — so
+avrdude's `-D` would AND the new image into the resident one. The chip erase is
+therefore unavoidable, and Urboot is rewritten from the same pinned image and
+lock bits that provisioning installs, so the `fw-flash` path keeps working. The
+quadrant identity in EEPROM survives because provisioning programs EESAVE; the
+tool reads the high fuse before erasing anything and falls back to saving and
+rewriting EEPROM when EESAVE is clear. That pre-flight read also means a bad ISP
+link fails before the flash is touched. `--bitclock` sets the ISP period in
+microseconds (default 1, i.e. 750 kHz on a USBasp); a part still on its factory
+1 MHz clock needs `--bitclock 8`.
+
 ## Update a quadrant over the ESP USB port
 
 Once a quadrant is provisioned with Urboot, application updates no longer need
@@ -107,7 +133,8 @@ tools/flash-quadrant.py --port /dev/cu.usbserial-0001 --node 2 \
 
 `--port` is auto-detected when exactly one USB serial device is attached. These
 tools are also exposed as PlatformIO project tasks (sidebar: Project Tasks →
-ATmega328PB → Custom): simultaneous/sequential flash-all, flash/provision per quadrant, and the
+ATmega328PB → Custom): simultaneous/sequential flash-all, flash/provision per quadrant,
+the fast `flash_isp` update, and the
 protocol host tests, e.g. `pio run -d firmware-atmega -e ATmega328PB -t
 flash_all_quadrants`. The ISP fuse/bootloader environments are kept out of this
 list in the separate `firmware-atmega/provisioning/` project.

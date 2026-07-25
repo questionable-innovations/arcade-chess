@@ -24,14 +24,22 @@ void ProtocolService::begin() { Serial.begin(bringup::kBusBaud); }
 
 void ProtocolService::tick() {
   // Any inbound byte — frame, garbage, or flashing traffic — counts as an ESP
-  // being present, which suppresses the idle attract animation.
+  // being present, which suppresses the idle animation.
   if (Serial.available()) lighting_.noteBusActivity(millis());
+  arcade::Frame request{};
   while (Serial.available()) {
-    arcade::Frame request{};
     const auto result = decoder_.push(static_cast<uint8_t>(Serial.read()), request);
     if (result == arcade::DecodeResult::kFrame) {
       saturatingIncrement(rx_good_);
-      handleRequest(request);
+      // Broadcasts carry no reply, so they always run in arrival order. An
+      // addressed request only runs when nothing is queued behind it: the ESP
+      // keeps one transaction outstanding and sends nothing — not even a render
+      // marker — until it is answered or timed out, so anything already buffered
+      // behind a request proves the ESP abandoned it and re-armed the bus for
+      // another node. Timestamps cannot decide this instead: after a stall (the
+      // ~240 ms first CONFIG_SET erase) every buffered frame decodes at once.
+      if (request.destination == arcade::kBroadcastAddress) handleBroadcast(request);
+      else if (!Serial.available()) handleRequest(request);
     } else if (result != arcade::DecodeResult::kNone &&
                result != arcade::DecodeResult::kEmpty) {
       saturatingIncrement(rx_bad_);
@@ -46,20 +54,22 @@ void ProtocolService::sendFrame(arcade::Frame& response) {
   if (length) { Serial.write(wire, length); Serial.flush(); }
 }
 
-arcade::Frame ProtocolService::makeResponse(const arcade::Frame& request,
-                                             arcade::MessageType type) const {
-  arcade::Frame response{};
+void ProtocolService::beginResponse(arcade::Frame& response, uint8_t destination,
+                                    uint8_t sequence, arcade::MessageType type) const {
   response.flags = arcade::kResponse |
       (sensors_.eventDepth() ? arcade::kEventPending : 0);
   response.source = identity_.node_id;
-  response.destination = request.source;
+  response.destination = destination;
   response.type = type;
-  response.sequence = request.sequence;
-  return response;
+  response.sequence = sequence;
+  response.payload_length = 0;
 }
 
-void ProtocolService::sendError(const arcade::Frame& request, uint8_t code) {
-  auto response = makeResponse(request, arcade::MessageType::kError);
+// Re-uses the response the caller already built: a second stack Frame here is
+// 119 bytes on the deepest path there is.
+void ProtocolService::sendError(arcade::Frame& response, const arcade::Frame& request,
+                                uint8_t code) {
+  response.type = arcade::MessageType::kError;
   response.flags |= arcade::kError;
   response.payload[0] = static_cast<uint8_t>(request.type);
   response.payload[1] = code;
@@ -121,18 +131,25 @@ uint16_t ProtocolService::configValue(uint8_t key) const {
   }
 }
 
-void ProtocolService::handleRequest(const arcade::Frame& request) {
+void ProtocolService::handleBroadcast(const arcade::Frame& request) {
   if (firmware_update_.handleBroadcast(request)) return;
-  if (request.destination == arcade::kBroadcastAddress &&
-      request.type == arcade::MessageType::kRenderWindow &&
-      !(request.flags & arcade::kResponse)) {
-    if (!firmware_update_.responsesSuppressed()) lighting_.requestRender();
-    return;
+  if (request.type == arcade::MessageType::kRenderWindow &&
+      !(request.flags & arcade::kResponse) &&
+      !firmware_update_.responsesSuppressed()) {
+    lighting_.requestRender();
   }
-  if (request.destination != identity_.node_id || request.flags & arcade::kResponse ||
+}
+
+void ProtocolService::handleRequest(const arcade::Frame& request) {
+  // An unprovisioned node_id is kInvalidNodeAddress, which is the same 0xff as
+  // kBroadcastAddress; compare against the valid range so a blank EEPROM cannot
+  // make broadcasts look like addressed traffic.
+  if (identity_.node_id >= arcade::kQuadrantCount ||
+      request.destination != identity_.node_id || request.flags & arcade::kResponse ||
       firmware_update_.responsesSuppressed()) return;
 
-  auto response = makeResponse(request, request.type);
+  arcade::Frame response{};
+  beginResponse(response, request.source, request.sequence, request.type);
   switch (request.type) {
     case arcade::MessageType::kPing:
       arcade::putU32(response.payload, millis());
@@ -188,21 +205,22 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       break;
     }
     case arcade::MessageType::kGetRawScan:
-      if (raw_response_pending_) { sendError(request, 12); return; }
+      if (raw_response_pending_) { sendError(response, request, 12); return; }
       // Belt and braces: only serviceRawResponse() consumes a finished capture,
       // so an unclaimed one would refuse every later scan. Discard, never refuse.
       if (sensors_.rawCaptureReady()) sensors_.consumeRawCapture();
       if (!sensors_.startRawCapture(request.payload_length ? request.payload[0] : 1)) {
-        sendError(request, 11); return;
+        sendError(response, request, 11); return;
       }
-      raw_request_ = request;
+      raw_request_source_ = request.source;
+      raw_request_sequence_ = request.sequence;
       raw_response_pending_ = true;
       return;
     case arcade::MessageType::kCalibrate:
-      if (request.payload_length != 1) { sendError(request, 1); return; }
+      if (request.payload_length != 1) { sendError(response, request, 1); return; }
       if (request.payload[0] == 1) sensors_.startCalibration();
       else if (request.payload[0] == 2) sensors_.cancelCalibration();
-      else { sendError(request, 1); return; }
+      else { sendError(response, request, 1); return; }
       response.type = arcade::MessageType::kCalibrationResult;
       response.payload[0] = sensors_.calibrating() ? 1 : 0;
       response.payload[1] = sensors_.calibrationPercent();
@@ -210,7 +228,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = 4;
       break;
     case arcade::MessageType::kSetSquares:
-      if (request.payload_length != 7) { sendError(request, 1); return; }
+      if (request.payload_length != 7) { sendError(response, request, 1); return; }
       lighting_.setSquares(arcade::getU16(request.payload), request.payload[2],
           request.payload[3], request.payload[4],
           arcade::getU16(request.payload + 5), millis());
@@ -218,12 +236,12 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = 2;
       break;
     case arcade::MessageType::kSetBrightness:
-      if (request.payload_length != 1) { sendError(request, 1); return; }
+      if (request.payload_length != 1) { sendError(response, request, 1); return; }
       lighting_.setBrightness(request.payload[0]); saveSettings(settings_);
       response.payload[0] = settings_.brightness; response.payload_length = 1;
       break;
     case arcade::MessageType::kIdentify:
-      if (request.payload_length != 2) { sendError(request, 1); return; }
+      if (request.payload_length != 2) { sendError(response, request, 1); return; }
       lighting_.identify(arcade::getU16(request.payload), millis());
       memcpy(response.payload, request.payload, 2); response.payload_length = 2;
       break;
@@ -248,13 +266,13 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
     }
     case arcade::MessageType::kConfigSet:
       if (!request.payload_length || request.payload_length % kConfigEntryBytes) {
-        sendError(request, 1); return;
+        sendError(response, request, 1); return;
       }
       for (uint8_t offset = 0; offset < request.payload_length;
            offset += kConfigEntryBytes) {
         if (!applyConfig(request.payload[offset],
                          arcade::getU16(request.payload + offset + 1))) {
-          sendError(request, 5); return;
+          sendError(response, request, 5); return;
         }
       }
       saveSettings(settings_);
@@ -262,7 +280,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = request.payload_length;
       break;
     case arcade::MessageType::kSetDebug:
-      if (request.payload_length != 3) { sendError(request, 1); return; }
+      if (request.payload_length != 3) { sendError(response, request, 1); return; }
       debug_flags_ = request.payload[0];
       debug_raw_interval_ms_ = arcade::getU16(request.payload + 1);
       response.payload[0] = debug_flags_;
@@ -272,9 +290,9 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
     default: {
       uint8_t error_code = 0;
       if (!firmware_update_.handleRequest(request, response, error_code)) {
-        sendError(request, 2); return;
+        sendError(response, request, 2); return;
       }
-      if (error_code) { sendError(request, error_code); return; }
+      if (error_code) { sendError(response, request, error_code); return; }
       break;
     }
   }
@@ -283,14 +301,19 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
 
 void ProtocolService::serviceRawResponse() {
   if (!raw_response_pending_) return;
-  if (!sensors_.rawCaptureReady()) {
-    // A firmware handoff calls abortRawCapture() underneath an in-flight request.
-    // Dropping it here is what clears the pending flag in that case; otherwise it
-    // latches and every later raw scan is refused with error 12.
-    if (!sensors_.rawCaptureSampling()) raw_response_pending_ = false;
+  // Two drops, one test. A suppressed node must not put a 99-byte frame on the
+  // wire during another node's bootloader session, and a firmware handoff calls
+  // abortRawCapture() underneath an in-flight request — without clearing the
+  // pending flag here it latches and every later raw scan is refused with 12.
+  if (firmware_update_.responsesSuppressed() || !sensors_.rawCaptureBusy()) {
+    sensors_.abortRawCapture();
+    raw_response_pending_ = false;
     return;
   }
-  auto response = makeResponse(raw_request_, arcade::MessageType::kRawScan);
+  if (!sensors_.rawCaptureReady()) return;
+  arcade::Frame response{};
+  beginResponse(response, raw_request_source_, raw_request_sequence_,
+                arcade::MessageType::kRawScan);
   response.payload[0] = sensors_.rawCaptureSamples();
   arcade::putU16(response.payload + 1, system_info::supplyMillivolts());
   uint8_t offset = kRawHeaderBytes;

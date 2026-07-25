@@ -19,7 +19,9 @@ quadrant::Diagnostics diagnostics(identity, settings, sensors);
 }
 
 void setup() {
-  if (!quadrant::loadIdentity(identity)) identity.node_id = arcade::kInvalidNodeAddress;
+  const bool provisioned = quadrant::loadIdentity(identity) &&
+                           identity.node_id < arcade::kQuadrantCount;
+  if (!provisioned) identity.node_id = arcade::kInvalidNodeAddress;
   quadrant::loadSettings(settings);
 #ifdef ARCADE_STANDALONE_ASCII_DEBUG
   settings.runtime_mode = arcade::RuntimeMode::kBringup;
@@ -29,6 +31,12 @@ void setup() {
 #endif
   sensors.begin();
   lighting.begin();
+#ifndef ARCADE_STANDALONE_ASCII_DEBUG
+  // Bring-up boards are unprovisioned by design and are never on the bus; the
+  // blink would replace the idle breath and sensor overlay they exist to show,
+  // and the CSV already carries node_id.
+  if (!provisioned) lighting.markUnprovisioned();
+#endif
   firmware_update.begin();
   wdt_enable(WDTO_2S);
 }

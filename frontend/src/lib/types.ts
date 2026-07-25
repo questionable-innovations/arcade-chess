@@ -10,29 +10,54 @@ export interface NodeSummary {
 	firmware?: string;
 	reset_cause?: string | number;
 	timeouts?: number;
+	consecutive_timeouts?: number;
+	last_seen_ms?: number;
+	// Node-reported health, only present when the node runs extended firmware
+	// (STATUS payload >= 17 bytes). node_rx_bad and node_event_overflow are the
+	// two that mean actual data loss.
+	node_uptime_ms?: number;
+	event_depth?: number;
+	last_scan_ms?: number;
+	node_rx_good?: number;
+	node_rx_bad?: number;
+	node_event_overflow?: number;
+	supply_mv?: number;
+	// ESP-side: times this node's uptime went backwards.
+	reboots?: number;
 }
 
 // Loose superset of every device-event `data` payload we read.
-export interface EventData {
+export interface EventData extends Partial<NodeSummary> {
 	square?: number;
 	state?: SquareState;
 	raw?: number;
 	baseline?: number;
-	node?: number;
 	local_square?: number;
 	squares?: number[];
 	valid?: boolean[];
 	nodes?: NodeSummary[];
-	online?: boolean;
-	calibrated?: boolean;
-	firmware?: string;
-	reset_cause?: string | number;
+	// device.status
 	rssi?: number;
 	heap?: number;
-	uptime?: number;
+	uptime?: number; // legacy millis field, superseded by uptime_ms
+	uptime_ms?: number;
+	websocket_reconnects?: number;
+	uart_good?: number;
+	uart_bad?: number;
+	uart_timeouts?: number;
+	quadrant_mask?: number;
+	quadrant_count?: number;
+	mode?: string;
+	ws_send_failed?: number;
+	events_dropped_offline?: number;
+	snapshot_repairs?: number;
+	raw_stream?: boolean;
+	trace?: boolean;
+	reset_reason?: number;
 	level?: string;
 	component?: string;
 	message?: string;
+	suppressed?: number;
 	phase?: string;
 	percent?: number;
 	samples?: number;
@@ -52,6 +77,8 @@ export interface EventData {
 	raw_hex?: string;
 	dropped?: number;
 	reason?: string;
+	// command.result reason=node_error detail
+	code?: number;
 }
 
 // UART message-type names (protocol/include/arcade_protocol/protocol.h).
@@ -156,6 +183,16 @@ export interface Envelope {
 	reason?: string | null;
 }
 
+// A node coming or going, as journalled by the server (newest last, max 64).
+export interface NodeTransition {
+	unix_ms: number;
+	node: number;
+	online: boolean;
+	reset_cause?: number;
+	timeouts?: number;
+	event_overflow?: number;
+}
+
 // One device as delivered inside an `init` message.
 export interface DeviceView {
 	device_id: string;
@@ -165,6 +202,7 @@ export interface DeviceView {
 	node_status?: (Envelope | null)[];
 	device_status?: Envelope | null;
 	recent?: Envelope[];
+	node_events?: NodeTransition[];
 }
 
 // A message from the server on the client channel.
@@ -173,6 +211,8 @@ export interface InMsg {
 	devices?: DeviceView[];
 	device_id?: string;
 	event?: Envelope;
+	// Server wall-clock stamp for a relayed event, outside the device envelope.
+	recv_unix_ms?: number;
 	ok?: boolean;
 	id?: string;
 	reason?: string;
@@ -241,14 +281,28 @@ export function summarize(env: Envelope): string {
 		}
 		case 'sensor.raw_scan':
 			return `sensor.raw_scan ${d.scan_id ?? '?'} ${d.complete ? 'complete' : 'partial'} mask=${d.response_node_mask ?? '?'}`;
-		case 'node.status':
-			return `node.status n${d.node} ${d.online ? 'online' : 'offline'} cal=${d.calibrated ? 1 : 0}`;
+		case 'node.status': {
+			// Loss counters ride along in the ticker: a quadrant silently dropping
+			// events should be readable without opening the rail.
+			const loss = [
+				d.node_rx_bad ? ` rxbad=${d.node_rx_bad}` : '',
+				d.node_event_overflow ? ` ovf=${d.node_event_overflow}` : '',
+				d.reboots ? ` reboots=${d.reboots}` : ''
+			].join('');
+			return `node.status n${d.node} ${d.online ? 'online' : 'offline'} cal=${d.calibrated ? 1 : 0}${loss}`;
+		}
 		case 'device.status':
 			return `device.status rssi=${d.rssi ?? '?'} heap=${d.heap ?? '?'}`;
-		case 'command.result':
-			return `command.result ${env.id ?? ''} ${env.status ?? ''}${env.reason ? ` ${env.reason}` : ''}`.trim();
-		case 'diagnostic.log':
-			return `diagnostic.log ${d.level ?? ''} ${d.component ?? ''} ${d.message ?? ''}`.trim();
+		case 'command.result': {
+			const detail =
+				env.reason === 'node_error' && d.code != null ? ` n${d.node} code=${d.code}` : '';
+			return `command.result ${env.id ?? ''} ${env.status ?? ''}${env.reason ? ` ${env.reason}` : ''}${detail}`.trim();
+		}
+		case 'diagnostic.log': {
+			const sup = d.suppressed ? ` (+${d.suppressed} suppressed)` : '';
+			const node = d.node != null ? ` n${d.node}` : '';
+			return `diagnostic.log ${d.level ?? ''} ${d.component ?? ''}${node} ${d.message ?? ''}${sup}`.trim();
+		}
 		case 'calibration.progress':
 			return `calibration.progress n${d.node} ${d.phase ?? ''} ${d.percent ?? ''}%`;
 		case 'calibration.result':

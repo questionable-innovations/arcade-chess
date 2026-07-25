@@ -13,9 +13,19 @@ struct QuadrantState {
   uint8_t fw_version[3]{};
   uint32_t last_seen_ms = 0;
   uint16_t timeouts = 0;
-  uint16_t bad_frames = 0;
   uint16_t measured_avcc_mv = 0;
   uint8_t consecutive_timeouts = 0;
+  // Extended STATUS counters (payload >= 17 bytes). Pre-extension firmware never
+  // sets status_extended, so these stay absent instead of publishing zeroes.
+  bool status_extended = false;
+  uint8_t event_depth = 0;
+  uint16_t last_scan_ms = 0;
+  uint16_t rx_good = 0;
+  uint16_t rx_bad = 0;
+  uint16_t event_overflow = 0;
+  uint16_t supply_mv = 0;
+  // ESP-side: how many times this node's uptime has stepped backwards.
+  uint16_t reboots = 0;
   // Calibration wire codes from the extended status payload; 0xff = unknown
   // (offline or pre-extension firmware).
   uint8_t cal_phase = 0xff;
@@ -34,7 +44,9 @@ struct BusCallbacks {
   void (*sensorChanged)(uint8_t global_square, arcade::SensorState state,
                         uint16_t raw, uint8_t node, uint8_t local_square) = nullptr;
   void (*rawScanReady)(bool complete, uint32_t scan_id) = nullptr;
-  void (*commandComplete)(const char* correlation, bool ok, const char* reason) = nullptr;
+  // node/node_error_code are meaningful only when reason is "node_error".
+  void (*commandComplete)(const char* correlation, bool ok, const char* reason,
+                          uint8_t node, uint8_t node_error_code) = nullptr;
   void (*nodePresenceChanged)(uint8_t node, bool online) = nullptr;
   void (*nodeStatusChanged)(uint8_t node) = nullptr;
   void (*fwResponse)(uint8_t node, arcade::MessageType type, bool ok,
@@ -43,7 +55,10 @@ struct BusCallbacks {
   void (*calibrationResult)(uint8_t node, bool ok, const char* reason) = nullptr;
   void (*busTrace)(const char* direction, uint8_t node, uint8_t sequence,
                    arcade::MessageType type, const char* result,
-                   const uint8_t* payload, uint8_t length) = nullptr;
+                   const uint8_t* payload, uint8_t length,
+                   uint8_t node_error_code) = nullptr;
+  void (*log)(const char* level, const char* component, const char* message,
+              uint8_t node) = nullptr;
 };
 
 class BusManager {
@@ -96,6 +111,12 @@ class BusManager {
   uint32_t goodFrames() const { return good_frames_; }
   uint32_t badFrames() const { return bad_frames_; }
   uint32_t timeoutCount() const { return timeout_count_; }
+  uint32_t snapshotRepairs() const { return snapshot_repairs_; }
+  // Lets code that only holds the bus (the flasher) reach the diagnostic channel.
+  void log(const char* level, const char* component, const char* message,
+           uint8_t node = arcade::kInvalidNodeAddress) const {
+    if (callbacks_.log) callbacks_.log(level, component, message, node);
+  }
   bool busy() const { return pending_ || queue_count_ || raw_active_; }
   bool programmingHandoff() const { return programming_handoff_; }
   uint32_t maintenanceToken() const { return maintenance_token_; }
@@ -151,6 +172,7 @@ class BusManager {
   uint32_t good_frames_ = 0;
   uint32_t bad_frames_ = 0;
   uint32_t timeout_count_ = 0;
+  uint32_t snapshot_repairs_ = 0;
   bool raw_active_ = false;
   bool raw_scans_blocked_ = false;
   uint8_t raw_samples_ = 1;

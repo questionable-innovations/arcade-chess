@@ -138,8 +138,13 @@ void Console::execute(char* line) {
       Serial.printf("firmware handoff: %s\n", queued ? "queued" : "rejected");
     }
   } else if (!strcmp(command, "fw-end")) {
-    const char* token = strtok_r(nullptr, " ", &save);
-    if (token) bus_->endFirmwareMaintenance(strtoul(token, nullptr, 0));
+    // Clearing the lease mid-flash strands Serial2 at the bootloader baud and
+    // kills the whole bus; fw-abort is the path that also restores it.
+    if (flasher_->active()) Serial.println(F("fw-end refused while flashing; use fw-abort"));
+    else {
+      const char* token = strtok_r(nullptr, " ", &save);
+      if (token) bus_->endFirmwareMaintenance(strtoul(token, nullptr, 0));
+    }
   } else if (!strcmp(command, "wifi")) {
     const char* ssid = strtok_r(nullptr, " ", &save);
     const char* pass = strtok_r(nullptr, "", &save);

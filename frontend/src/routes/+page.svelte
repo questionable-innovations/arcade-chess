@@ -9,6 +9,7 @@
 		POLARITY_GRADIENT,
 		type DeviceState,
 		type Envelope,
+		type EventData,
 		type SquareState
 	} from '$lib/types';
 
@@ -38,6 +39,7 @@
 		return () => {
 			clearInterval(t);
 			window.removeEventListener('keydown', onKey);
+			ws.teardown();
 		};
 	});
 
@@ -69,6 +71,14 @@
 
 	const ds = $derived(selected?.device_status?.data ?? null);
 
+	// A frozen board that looks live is what makes transient faults unreadable, so
+	// the rendered position is labelled the moment either link in the chain drops.
+	const stale = $derived.by((): string | null => {
+		if (!selected) return null;
+		if (!ws.connected) return 'link down';
+		return selected.connected ? null : 'board offline';
+	});
+
 	function submitAuth(e: Event) {
 		e.preventDefault();
 		if (password) ws.auth(password);
@@ -80,7 +90,7 @@
 
 	function onSquare(i: number) {
 		if (!ws.authed || !selected) return;
-		ws.probe(selected.device_id, i);
+		if (!ws.probe(selected.device_id, i)) return;
 		// Mirror the physical blue flash on screen so a dead LED chain is still
 		// distinguishable from a dead command path.
 		probeFlash = null;
@@ -132,12 +142,34 @@
 	function kb(n: number | undefined): string {
 		return n == null ? '—' : `${(n / 1024).toFixed(0)} KB`;
 	}
-	function dur(s: number | undefined): string {
-		if (s == null) return '—';
+	// Both the ESP and the nodes report uptime as raw millis().
+	function dur(ms: number | undefined): string {
+		if (ms == null) return '—';
+		const s = Math.floor(ms / 1000);
 		const h = Math.floor(s / 3600);
 		const m = Math.floor((s % 3600) / 60);
-		return h ? `${h}h ${m}m` : `${m}m`;
+		if (h) return `${h}h ${m}m`;
+		return m ? `${m}m` : `${s}s`;
 	}
+	function volts(mv: number | undefined): string {
+		return mv == null ? '—' : `${(mv / 1000).toFixed(2)}V`;
+	}
+	// Only extended firmware reports these; legacy nodes get no stats line at all.
+	function hasNodeStats(d: EventData | undefined): d is EventData {
+		if (!d) return false;
+		return (
+			d.node_uptime_ms != null ||
+			d.last_scan_ms != null ||
+			d.event_depth != null ||
+			d.node_rx_good != null ||
+			d.node_rx_bad != null ||
+			d.node_event_overflow != null ||
+			d.supply_mv != null ||
+			!!d.reboots ||
+			!!d.timeouts
+		);
+	}
+	const uptimeMs = $derived(ds?.uptime_ms ?? ds?.uptime);
 	const nodeLabel = ['n0', 'n1', 'n2', 'n3'];
 </script>
 
@@ -201,6 +233,7 @@
 				{debug}
 				{heatmap}
 				{heatSpan}
+				{stale}
 				admin={ws.authed}
 				{probeFlash}
 				{onSquare}
@@ -244,8 +277,40 @@
 						</div>
 						<div>
 							<dt>uptime</dt>
-							<dd class="tnum">{dur(ds?.uptime)}</dd>
+							<dd class="tnum">{dur(uptimeMs)}</dd>
 						</div>
+						{#if ds?.uart_good != null || ds?.uart_bad != null}
+							<div>
+								<dt>uart</dt>
+								<dd class="tnum" class:warn={!!(ds?.uart_bad || ds?.uart_timeouts)}>
+									{ds?.uart_good ?? 0} ok · {ds?.uart_bad ?? 0} bad · {ds?.uart_timeouts ?? 0} to
+								</dd>
+							</div>
+						{/if}
+						{#if ds?.ws_send_failed != null || ds?.events_dropped_offline != null}
+							<div>
+								<dt>ws drops</dt>
+								<dd
+									class="tnum"
+									class:warn={!!(ds?.ws_send_failed || ds?.events_dropped_offline)}
+									title="sendTXT failures · events discarded while the socket was not welcomed"
+								>
+									{ds?.ws_send_failed ?? 0} send · {ds?.events_dropped_offline ?? 0} offline
+								</dd>
+							</div>
+						{/if}
+						{#if ds?.snapshot_repairs != null}
+							<div>
+								<dt>repairs</dt>
+								<dd
+									class="tnum"
+									class:warn={!!ds.snapshot_repairs}
+									title="squares corrected by snapshot reconciliation"
+								>
+									{ds.snapshot_repairs}
+								</dd>
+							</div>
+						{/if}
 					</dl>
 				</div>
 
@@ -268,22 +333,61 @@
 							{@const d = selected?.node_status[n]?.data}
 							{@const cal = selected?.calibration[n]}
 							<li>
-								<span class="ring {h}" class:pulse={cal?.active}></span>
-								<span class="nname tnum">{nodeLabel[n]}</span>
-								<span class="nstate {h}">{cal?.active ? 'calibrating' : h}</span>
-								<span class="nfw tnum">{d?.firmware ?? ''}</span>
-								<button
-									class="chip ncal"
-									class:arm={calArm === n}
-									class:bad={cal?.ok === false}
-									disabled={!ws.authed || h === 'offline' || h === 'unseen' || cal?.active}
-									onclick={() => onCalibrate(n)}
-									title={cal?.ok === false
-										? `calibration failed: ${cal.reason ?? 'unknown'}`
-										: 'calibrate this quadrant (empty board)'}
-								>
-									{calArm === n ? 'empty?' : calLabel(n)}
-								</button>
+								<div class="nrow">
+									<span class="ring {h}" class:pulse={cal?.active}></span>
+									<span class="nname tnum">{nodeLabel[n]}</span>
+									<span class="nstate {h}">{cal?.active ? 'calibrating' : h}</span>
+									<span class="nfw tnum">{d?.firmware ?? ''}</span>
+									<button
+										class="chip ncal"
+										class:arm={calArm === n}
+										class:bad={cal?.ok === false}
+										disabled={!ws.authed || h === 'offline' || h === 'unseen' || cal?.active}
+										onclick={() => onCalibrate(n)}
+										title={cal?.ok === false
+											? `calibration failed: ${cal.reason ?? 'unknown'}`
+											: 'calibrate this quadrant (empty board)'}
+									>
+										{calArm === n ? 'empty?' : calLabel(n)}
+									</button>
+								</div>
+								<!-- Node-reported health. rx-bad and ovf are the two that mean lost data. -->
+								{#if hasNodeStats(d)}
+									<div class="nstats tnum">
+										{#if d.node_uptime_ms != null}<span title="node uptime"
+												>{dur(d.node_uptime_ms)}</span
+											>{/if}
+										{#if d.reboots}<span class="warn" title="observed node reboots"
+												>rb {d.reboots}</span
+											>{/if}
+										{#if d.last_scan_ms != null}<span title="last full scan"
+												>scan {d.last_scan_ms}ms</span
+											>{/if}
+										{#if d.event_depth != null}<span title="events queued on the node"
+												>ev {d.event_depth}</span
+											>{/if}
+										{#if d.supply_mv != null}<span title="node supply">{volts(d.supply_mv)}</span
+											>{/if}
+										{#if d.node_rx_good != null || d.node_rx_bad != null}
+											<span
+												class:warn={!!d.node_rx_bad}
+												title="frames decoded / rejected by the node"
+											>
+												rx {d.node_rx_good ?? 0}/{d.node_rx_bad ?? 0}
+											</span>
+										{/if}
+										{#if d.node_event_overflow != null}
+											<span
+												class:warn={!!d.node_event_overflow}
+												title="sensor events dropped by a full node queue"
+											>
+												ovf {d.node_event_overflow}
+											</span>
+										{/if}
+										{#if d.timeouts}<span class="warn" title="bus timeouts">to {d.timeouts}</span
+											>{/if}
+									</div>
+								{/if}
 							</li>
 						{/each}
 					</ul>
@@ -626,6 +730,9 @@
 	dd.bad {
 		color: var(--color-fault);
 	}
+	dd.warn {
+		color: var(--color-warn);
+	}
 
 	.nodes {
 		list-style: none;
@@ -637,10 +744,26 @@
 	}
 	.nodes li {
 		display: flex;
-		align-items: center;
-		gap: 9px;
+		flex-direction: column;
+		gap: 3px;
 		font-family: var(--font-mono);
 		font-size: 11.5px;
+	}
+	.nrow {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+	}
+	.nstats {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		padding-left: 17px;
+		font-size: 10px;
+		color: var(--color-fg-ghost);
+	}
+	.nstats .warn {
+		color: var(--color-warn);
 	}
 	.ring {
 		width: 8px;

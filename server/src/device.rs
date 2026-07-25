@@ -1,7 +1,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -10,12 +11,20 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::state::{random_hex, AppState};
+use crate::state::{now_ms, random_hex, AppState};
 
 // A full sensor.raw_scan carries four 64-entry arrays and can approach the old
 // 2 KiB ceiling once envelope metadata and longer device IDs are included.
 const MAX_MSG_BYTES: usize = 4096;
 const HEARTBEAT_MS: u64 = 15_000;
+/// Read deadline for an established device link. The device publishes
+/// `device.status` every 15 s and pings on the same period, and its longest
+/// main-loop stall is one ~400 ms flash page write, so three missed periods
+/// means the socket is half-open (power cut, NAT eviction, AP gone) and must be
+/// torn down — otherwise the entry stays `connected` and commands vanish.
+const DEVICE_READ_TIMEOUT: Duration = Duration::from_secs(45);
+/// A device that connects and never says `hello` holds a task and a socket.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Device event `type` values defined by websocket-api.md. Anything else is
 /// relayed but logged as unrecognized per the transport contract.
@@ -55,9 +64,13 @@ pub async fn board_ws(
 async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    let hello = match read_hello(&state, &mut receiver).await {
-        Some(hello) => hello,
-        None => return,
+    let hello = match tokio::time::timeout(HELLO_TIMEOUT, read_hello(&state, &mut receiver)).await {
+        Ok(Some(hello)) => hello,
+        Ok(None) => return,
+        Err(_) => {
+            tracing::warn!("device sent no hello before deadline; closing");
+            return;
+        }
     };
     let device_id = match hello.get("device_id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -94,25 +107,50 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
         Some(session) => session,
         None => {
             tracing::warn!(device_id = %device_id, "device cap reached; refusing registration");
+            let _ = sender
+                .send(Message::Close(Some(CloseFrame {
+                    code: close_code::AGAIN,
+                    reason: "device_cap".into(),
+                })))
+                .await;
             return;
         }
     };
     state.broadcast_msg(json!({ "type": "device.connected", "device_id": device_id }).to_string());
 
-    // Writer task owns the socket sink and drains queued commands to the device.
+    // Writer task owns the socket sink: it drains queued commands and sends the
+    // heartbeat the welcome advertises, which also keeps NAT bindings alive.
     let writer = tokio::spawn(async move {
-        while let Some(text) = cmd_rx.recv().await {
-            if sender.send(Message::Text(text.into())).await.is_err() {
-                break;
+        // interval_at: `interval`'s first tick is immediate, which would ping the
+        // device before it has finished processing the welcome.
+        let period = Duration::from_millis(HEARTBEAT_MS);
+        let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            tokio::select! {
+                text = cmd_rx.recv() => {
+                    let Some(text) = text else { break };
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = beat.tick() => {
+                    if sender.send(Message::Ping(Default::default())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
 
     let mut warned_stale = false;
-    while let Some(msg) = receiver.next().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
+    loop {
+        let msg = match tokio::time::timeout(DEVICE_READ_TIMEOUT, receiver.next()).await {
+            Ok(Some(Ok(m))) => m,
+            Ok(_) => break,
+            Err(_) => {
+                tracing::warn!(device_id = %device_id, "device read timed out; closing link");
+                break;
+            }
         };
         match msg {
             Message::Text(text) => {
@@ -204,8 +242,16 @@ fn handle_event(
         }
         return;
     };
+    // Stamp arrival outside the envelope: the device only knows its own millis,
+    // so nothing else can line an event up against a server log or a wall clock.
     state.broadcast_msg(
-        json!({ "type": "event", "device_id": device_id, "event": event }).to_string(),
+        json!({
+            "type": "event",
+            "device_id": device_id,
+            "recv_unix_ms": now_ms(),
+            "event": event,
+        })
+        .to_string(),
     );
 
     if need_snapshot {

@@ -1,9 +1,20 @@
 <script lang="ts">
 	import { ws } from './ws.svelte';
-	import { messageTypeLabel, type DeviceState, type Envelope } from './types';
+	import { messageTypeLabel, nodeHealth, type DeviceState, type Envelope } from './types';
 
 	let { device }: { device: DeviceState | null } = $props();
 	let view = $state<'events' | 'bus'>('events');
+
+	// The link is a chain; a break anywhere upstream freezes everything downstream,
+	// so all three hops stay on screen rather than one aggregate "connected" dot.
+	const nodesOnline = $derived(
+		device
+			? device.node_status.filter((n) => {
+					const h = nodeHealth(n);
+					return h !== 'offline' && h !== 'unseen';
+				}).length
+			: 0
+	);
 
 	// Space the hex pairs so payload bytes can be read against docs/uart-api.md.
 	function spacedHex(hex: string | undefined): string {
@@ -25,6 +36,18 @@
 		<button class="title tab" class:on={view === 'bus'} onclick={() => (view = 'bus')}>
 			bus{#if ws.tracing}<span class="livedot"></span>{/if}
 		</button>
+		<span class="chain tnum" title="browser → server → device → quadrants">
+			<span class="seg" class:ok={ws.connected} class:bad={!ws.connected}>ws</span>
+			<span class="arrow">›</span>
+			<span class="seg" class:ok={device?.connected} class:bad={!device?.connected}>esp</span>
+			<span class="arrow">›</span>
+			<span
+				class="seg"
+				class:ok={nodesOnline === 4}
+				class:warn={nodesOnline > 0 && nodesOnline < 4}
+				class:bad={nodesOnline === 0}>{nodesOnline}/4</span
+			>
+		</span>
 		{#if device}
 			<span class="meta tnum">
 				boot {device.bootId ?? '—'} · seq {device.seq < 0 ? '—' : device.seq}{#if device.gap}<span
@@ -170,6 +193,37 @@
 	.hex {
 		color: var(--color-fg-faint);
 		letter-spacing: 0.02em;
+	}
+	.chain {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		letter-spacing: 0.04em;
+		color: var(--color-fg-ghost);
+	}
+	.chain .seg {
+		padding: 0 5px;
+		border-radius: 4px;
+		border: 1px solid transparent;
+	}
+	.chain .arrow {
+		color: var(--color-fg-ghost);
+		opacity: 0.6;
+	}
+	.chain .seg.ok {
+		color: var(--color-live);
+		border-color: color-mix(in srgb, var(--color-live) 32%, transparent);
+	}
+	.chain .seg.warn {
+		color: var(--color-warn);
+		border-color: color-mix(in srgb, var(--color-warn) 34%, transparent);
+	}
+	.chain .seg.bad {
+		color: var(--color-fault);
+		border-color: color-mix(in srgb, var(--color-fault) 40%, transparent);
+		background: color-mix(in srgb, var(--color-fault) 12%, transparent);
 	}
 	.meta {
 		font-family: var(--font-mono);

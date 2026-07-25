@@ -76,6 +76,10 @@ void FirmwareUpdate::begin() {
 bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
   if (request.destination != arcade::kBroadcastAddress ||
       request.flags & arcade::kResponse) return false;
+  // An unprovisioned node_id is 0xff, so `1U << identity_.node_id` below would be
+  // undefined and the maintenance target checks would alias kBroadcastAddress. It
+  // can never be a flash target anyway, so opt it out of the whole path.
+  if (identity_.node_id >= arcade::kQuadrantCount) return false;
   if (request.type == arcade::MessageType::kMaintenanceBegin &&
       request.payload_length == kMaintenanceBeginBytes) {
     maintenance_target_ = request.payload[kMaintenanceTargetOffset];

@@ -23,12 +23,13 @@ class ProtocolService {
   uint16_t badFrames() const { return rx_bad_; }
 
  private:
+  void handleBroadcast(const arcade::Frame& request);
   void handleRequest(const arcade::Frame& request);
   void serviceRawResponse();
   void sendFrame(arcade::Frame& response);
-  void sendError(const arcade::Frame& request, uint8_t code);
-  arcade::Frame makeResponse(const arcade::Frame& request,
-                             arcade::MessageType type) const;
+  void sendError(arcade::Frame& response, const arcade::Frame& request, uint8_t code);
+  void beginResponse(arcade::Frame& response, uint8_t destination, uint8_t sequence,
+                     arcade::MessageType type) const;
   bool applyConfig(uint8_t key, uint16_t value);
   uint16_t configValue(uint8_t key) const;
 
@@ -43,7 +44,10 @@ class ProtocolService {
   uint8_t debug_flags_ = 0;
   uint16_t debug_raw_interval_ms_ = 0;
   bool raw_response_pending_ = false;
-  arcade::Frame raw_request_{};
+  // Only the reply header survives a deferred raw capture; keeping the whole
+  // request would cost another ~119 bytes of a 2 KB part.
+  uint8_t raw_request_source_ = 0;
+  uint8_t raw_request_sequence_ = 0;
 };
 
 }  // namespace quadrant

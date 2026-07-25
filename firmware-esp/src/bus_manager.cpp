@@ -132,21 +132,24 @@ bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t 
     uint8_t node = 0, local = 0;
     if (locateGlobal(squares[i], node, local)) masks[node] |= 1U << local;
   }
-  bool any = false;
+  uint8_t targets = 0;
   int8_t last_node = -1;
   for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
-    if (masks[node] && nodes_[node].online) last_node = node;
+    if (masks[node] && nodes_[node].online) { last_node = node; ++targets; }
   }
+  // All or nothing: a partial fan-out drops the correlation carried by the last
+  // target and the client then waits forever for a terminal result.
+  if (!targets || queue_count_ + targets > kQueueCapacity) return false;
   for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
     if (!masks[node] || !nodes_[node].online) continue;
     uint8_t payload[7];
     arcade::putU16(payload, masks[node]);
     payload[2] = red; payload[3] = green; payload[4] = blue;
     arcade::putU16(payload + 5, duration_ms);
-    any |= enqueue(node, arcade::MessageType::kSetSquares, payload, sizeof(payload),
-                   node == last_node ? correlation : nullptr);
+    if (!enqueue(node, arcade::MessageType::kSetSquares, payload, sizeof(payload),
+                 node == last_node ? correlation : nullptr)) return false;
   }
-  return any;
+  return true;
 }
 
 bool BusManager::clearGlobalSquares(const uint8_t* squares, size_t count,
@@ -157,20 +160,21 @@ bool BusManager::clearGlobalSquares(const uint8_t* squares, size_t count,
     uint8_t node = 0, local = 0;
     if (locateGlobal(squares[i], node, local)) masks[node] |= 1U << local;
   }
-  bool any = false;
+  uint8_t targets = 0;
   int8_t last_node = -1;
   for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
-    if ((all || masks[node]) && nodes_[node].online) last_node = node;
+    if ((all || masks[node]) && nodes_[node].online) { last_node = node; ++targets; }
   }
+  if (!targets || queue_count_ + targets > kQueueCapacity) return false;
   for (uint8_t node = 0; node < arcade::kQuadrantCount; ++node) {
     if ((!all && !masks[node]) || !nodes_[node].online) continue;
     uint8_t payload[2];
     arcade::putU16(payload, masks[node]);
-    any |= enqueue(node, arcade::MessageType::kClearLighting, payload,
-                   all ? 0 : sizeof(payload),
-                   node == last_node ? correlation : nullptr);
+    if (!enqueue(node, arcade::MessageType::kClearLighting, payload,
+                 all ? 0 : sizeof(payload),
+                 node == last_node ? correlation : nullptr)) return false;
   }
-  return any;
+  return true;
 }
 
 void BusManager::tick(uint32_t now_ms) {
@@ -198,6 +202,10 @@ void BusManager::receive(uint32_t now_ms) {
     else if (result != arcade::DecodeResult::kNone && result != arcade::DecodeResult::kEmpty) {
       ++bad_frames_;
       Serial.printf("[%10u][W][BUS] decoder error=%u\n", now_ms, static_cast<unsigned>(result));
+      char message[40];
+      snprintf(message, sizeof(message), "decoder error=%u",
+               static_cast<unsigned>(result));
+      log("warn", "bus", message);
     }
   }
 }
@@ -218,15 +226,26 @@ void BusManager::send(uint8_t node, arcade::MessageType type, const uint8_t* pay
   serial_->write(wire, wire_length);
   pending_ = true; pending_node_ = node; pending_sequence_ = frame.sequence;
   pending_type_ = type;
+  // Anything that reaches saveSettings() blocks the node for ~3.3 ms per changed
+  // EEPROM byte; the first CONFIG_SET after a node boots rewrites the whole
+  // 72-byte record. A 50 ms deadline expires mid-write, the bus is re-armed in
+  // the same tick and the late reply then collides with another node's.
+  // Calibration completion saves inside the scan loop, so its STATUS poll needs
+  // the same budget.
   const bool slow_eeprom = type == arcade::MessageType::kFwPrepare ||
-                           type == arcade::MessageType::kFwEnterBootloader;
+                           type == arcade::MessageType::kFwEnterBootloader ||
+                           type == arcade::MessageType::kConfigSet ||
+                           type == arcade::MessageType::kSetBrightness ||
+                           (type == arcade::MessageType::kStatus &&
+                            node < arcade::kQuadrantCount &&
+                            nodes_[node].calibration_watch);
   deadline_ms_ = now_ms + (type == arcade::MessageType::kGetRawScan
       ? kRawResponseBaseMs + raw_samples_ * kRawResponsePerSampleMs
       : slow_eeprom ? kPersistentWriteTimeoutMs : kResponseTimeoutMs);
   copyCorrelation(pending_correlation_, correlation);
   if (callbacks_.busTrace) {
     callbacks_.busTrace("tx", node, frame.sequence, type, "sent",
-                        frame.payload, static_cast<uint8_t>(frame.payload_length));
+                        frame.payload, static_cast<uint8_t>(frame.payload_length), 0);
   }
 }
 
@@ -236,6 +255,10 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     ++bad_frames_;
     Serial.printf("[%10u][W][BUS] unexpected src=%u seq=%u type=0x%02x\n", now_ms,
                   frame.source, frame.sequence, static_cast<unsigned>(frame.type));
+    char message[48];
+    snprintf(message, sizeof(message), "unexpected reply seq=%u type=0x%02x",
+             frame.sequence, static_cast<unsigned>(frame.type));
+    log("warn", "bus", message, frame.source);
     return;
   }
   pending_ = false; ++good_frames_;
@@ -252,20 +275,16 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     if (callbacks_.nodePresenceChanged) callbacks_.nodePresenceChanged(frame.source, true);
   }
   bool ok = !(frame.flags & arcade::kError);
-  // An error payload is [request type, node error code]; a bare "node_error"
-  // hid which precondition failed, and the codes (docs/uart-api.md) are the only
-  // way to tell "calibrating" from "busy" or a lost maintenance lease.
-  char error_reason[24];
-  const char* reason = nullptr;
-  if (!ok) {
-    snprintf(error_reason, sizeof(error_reason), "node_error_%u",
-             frame.payload_length >= 2 ? frame.payload[1] : 0);
-    reason = error_reason;
-  }
+  // An error payload is [request type, node error code]. The reason string stays
+  // in the stable set and the code (docs/uart-api.md) rides alongside it — it is
+  // the only way to tell "calibrating" from "busy" or a lost maintenance lease.
+  const uint8_t node_error_code =
+      !ok && frame.payload_length >= 2 ? frame.payload[1] : 0;
+  const char* reason = ok ? nullptr : "node_error";
   if (callbacks_.busTrace) {
     callbacks_.busTrace("rx", frame.source, frame.sequence, frame.type,
                         ok ? "ok" : "error", frame.payload,
-                        static_cast<uint8_t>(frame.payload_length));
+                        static_cast<uint8_t>(frame.payload_length), node_error_code);
   }
 
   if (ok && pending_type_ == arcade::MessageType::kPollEvents && frame.payload_length >= 1) {
@@ -296,9 +315,11 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     finishRawIfReady();
   } else if (ok && pending_type_ == arcade::MessageType::kStatus && frame.payload_length >= 7) {
     const uint32_t uptime_ms = arcade::getU32(frame.payload);
+    const bool rebooted = node.last_uptime_ms && uptime_ms < node.last_uptime_ms;
+    bool status_changed = false;
     // An uptime step backwards means the node rebooted mid-watch; its restored
     // EEPROM flag (and phase code 2) must not masquerade as a fresh completion.
-    if (node.calibration_watch && uptime_ms < node.last_uptime_ms) {
+    if (node.calibration_watch && rebooted) {
       node.calibration_watch = false;
       if (callbacks_.calibrationResult) {
         callbacks_.calibrationResult(frame.source, false, "node_reset");
@@ -309,7 +330,44 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     const bool calibrated = frame.payload[5] != 0;
     if (node.calibrated != calibrated) {
       node.calibrated = calibrated;
-      if (callbacks_.nodeStatusChanged) callbacks_.nodeStatusChanged(frame.source);
+      status_changed = true;
+    }
+    // The extended block is a separate guard: pre-extension firmware stops at
+    // byte 6 and would otherwise publish whatever follows in the frame buffer.
+    if (frame.payload_length >= 17) {
+      node.status_extended = true;
+      node.event_depth = frame.payload[6];
+      node.last_scan_ms = arcade::getU16(frame.payload + 7);
+      const uint16_t rx_good = arcade::getU16(frame.payload + 9);
+      const uint16_t rx_bad = arcade::getU16(frame.payload + 11);
+      const uint16_t event_overflow = arcade::getU16(frame.payload + 13);
+      node.supply_mv = arcade::getU16(frame.payload + 15);
+      // Only growth is news: a reboot resets these saturating counters, and
+      // "differs" would then report the drop back to zero as a fresh fault.
+      if (rx_bad > node.rx_bad || event_overflow > node.event_overflow) {
+        status_changed = true;
+      }
+      node.rx_good = rx_good;
+      node.rx_bad = rx_bad;
+      node.event_overflow = event_overflow;
+    }
+    if (rebooted) {
+      // Outside a calibration watch this used to go unnoticed: the node kept
+      // online, kept its stale cached squares, and ran on defaults for the rest
+      // of the session because orientation and runtime mode were never re-sent.
+      if (node.reboots != UINT16_MAX) ++node.reboots;
+      poll_count_[frame.source] = 0;
+      node.needs_sync = !queueNodeSync(frame.source);
+      status_changed = true;
+      Serial.printf("[%10u][W][BUS] node=%u rebooted uptime_ms=%u reboots=%u\n",
+                    now_ms, frame.source, uptime_ms, node.reboots);
+      char message[48];
+      snprintf(message, sizeof(message), "node rebooted (reboots=%u); resyncing",
+               node.reboots);
+      log("warn", "bus", message, frame.source);
+    }
+    if (status_changed && callbacks_.nodeStatusChanged) {
+      callbacks_.nodeStatusChanged(frame.source);
     }
     if (frame.payload_length >= 19) {
       updateCalibration(frame.source, frame.payload[17], frame.payload[18], now_ms);
@@ -341,8 +399,19 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
   } else if (ok && pending_type_ == arcade::MessageType::kGetSnapshot &&
              frame.payload_length >= kSnapshotPayloadBytes) {
     for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
-      node.state[i] = static_cast<arcade::SensorState>(frame.payload[i]);
-      node.raw[i] = arcade::getU16(frame.payload + kSnapshotRawOffset + i * sizeof(uint16_t));
+      const auto state = static_cast<arcade::SensorState>(frame.payload[i]);
+      const uint16_t raw =
+          arcade::getU16(frame.payload + kSnapshotRawOffset + i * sizeof(uint16_t));
+      // A silent overwrite left the ESP right and every tier above it wrong
+      // forever; a non-zero repair count is the proof that events are being lost.
+      const bool repaired = state != node.state[i];
+      node.state[i] = state;
+      node.raw[i] = raw;
+      if (repaired) {
+        ++snapshot_repairs_;
+        if (callbacks_.sensorChanged) callbacks_.sensorChanged(
+            globalSquare(frame.source, i), state, raw, frame.source, i);
+      }
     }
   } else if (ok && pending_type_ == arcade::MessageType::kFwPreflight &&
              frame.payload_length >= kPreflightPayloadBytes) {
@@ -369,6 +438,9 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
     Serial.printf("[%10u][W][RAW] node=%u rejected raw scan type=0x%02x code=%u\n",
                   now_ms, frame.source, static_cast<unsigned>(frame.type),
                   frame.payload_length >= 2 ? frame.payload[1] : 0);
+    char message[40];
+    snprintf(message, sizeof(message), "raw scan rejected code=%u", node_error_code);
+    log("warn", "bus", message, frame.source);
     raw_done_mask_ |= 1U << frame.source;
     finishRawIfReady();
   }
@@ -400,7 +472,8 @@ void BusManager::handleResponse(const arcade::Frame& frame, uint32_t now_ms) {
   }
   if (pending_correlation_[0] && callbacks_.commandComplete &&
       pending_type_ != arcade::MessageType::kGetRawScan) {
-    callbacks_.commandComplete(pending_correlation_, ok, reason);
+    callbacks_.commandComplete(pending_correlation_, ok, reason, frame.source,
+                               node_error_code);
   }
 }
 
@@ -422,7 +495,7 @@ void BusManager::handleTimeout(uint32_t now_ms) {
   pending_ = false; ++timeout_count_;
   if (callbacks_.busTrace) {
     callbacks_.busTrace("rx", pending_node_, pending_sequence_, pending_type_,
-                        "timeout", nullptr, 0);
+                        "timeout", nullptr, 0, 0);
   }
   QuadrantState& node = nodes_[pending_node_];
   const bool was_online = node.online;
@@ -447,6 +520,11 @@ void BusManager::handleTimeout(uint32_t now_ms) {
     Serial.printf("[%10u][W][BUS] node=%u %s timeout type=0x%02x retry_ms=%u\n",
                   now_ms, pending_node_, confirmed_offline ? "offline" : "miss",
                   static_cast<unsigned>(pending_type_), retry_ms);
+    char message[48];
+    snprintf(message, sizeof(message), "%s on type=0x%02x retry_ms=%u",
+             confirmed_offline ? "node offline" : "poll miss",
+             static_cast<unsigned>(pending_type_), retry_ms);
+    log(confirmed_offline ? "error" : "warn", "bus", message, pending_node_);
   }
   if (was_online && confirmed_offline && callbacks_.nodePresenceChanged) {
     callbacks_.nodePresenceChanged(pending_node_, false);
@@ -455,7 +533,7 @@ void BusManager::handleTimeout(uint32_t now_ms) {
     raw_done_mask_ |= 1U << pending_node_;
     finishRawIfReady();
   } else if (pending_correlation_[0] && callbacks_.commandComplete) {
-    callbacks_.commandComplete(pending_correlation_, false, "timeout");
+    callbacks_.commandComplete(pending_correlation_, false, "timeout", pending_node_, 0);
   }
 }
 
@@ -515,7 +593,9 @@ void BusManager::finishRawIfReady() {
                 millis(), raw_scan_id_, raw_target_mask_, rawResponseMask(), complete);
   if (callbacks_.rawScanReady) callbacks_.rawScanReady(complete, raw_scan_id_);
   if (raw_correlation_[0] && callbacks_.commandComplete) {
-    callbacks_.commandComplete(raw_correlation_, complete, complete ? nullptr : "partial_scan");
+    callbacks_.commandComplete(raw_correlation_, complete,
+                               complete ? nullptr : "partial_scan",
+                               arcade::kInvalidNodeAddress, 0);
   }
 }
 

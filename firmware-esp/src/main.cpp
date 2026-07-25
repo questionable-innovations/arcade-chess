@@ -41,8 +41,9 @@ void rawScanReady(bool complete, uint32_t scan_id) {
   network.publishRawScan(complete, scan_id);
 }
 
-void commandComplete(const char* id, bool ok, const char* reason) {
-  network.commandComplete(id, ok, reason);
+void commandComplete(const char* id, bool ok, const char* reason, uint8_t node,
+                     uint8_t node_error_code) {
+  network.commandComplete(id, ok, reason, node, node_error_code);
 }
 
 void nodePresenceChanged(uint8_t node, bool online) {
@@ -63,8 +64,13 @@ void fwResponse(uint8_t node, arcade::MessageType type, bool ok,
 
 void busTrace(const char* direction, uint8_t node, uint8_t sequence,
               arcade::MessageType type, const char* result,
-              const uint8_t* payload, uint8_t length) {
-  network.publishBusTrace(direction, node, sequence, type, result, payload, length);
+              const uint8_t* payload, uint8_t length, uint8_t node_error_code) {
+  network.publishBusTrace(direction, node, sequence, type, result, payload, length,
+                          node_error_code);
+}
+
+void busLog(const char* level, const char* component, const char* message, uint8_t node) {
+  network.publishLog(level, component, message, node);
 }
 
 void calibrationProgress(uint8_t node, uint8_t percent) {
@@ -97,6 +103,7 @@ void setup() {
   callbacks.nodeStatusChanged = nodeStatusChanged;
   callbacks.fwResponse = fwResponse;
   callbacks.busTrace = busTrace;
+  callbacks.log = busLog;
   callbacks.calibrationProgress = calibrationProgress;
   callbacks.calibrationResult = calibrationResult;
   bus.begin(Serial2, callbacks);

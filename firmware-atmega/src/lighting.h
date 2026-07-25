@@ -22,14 +22,18 @@ class Lighting {
   void setBrightness(uint8_t brightness);
   void shutdownNow();
   void noteBusActivity(uint32_t now_ms) { last_bus_activity_ms_ = now_ms; }
+  // Blank-EEPROM nodes are silent on the bus and so indistinguishable from an
+  // absent one; blink instead of pretending to be a working quadrant.
+  void markUnprovisioned() { unprovisioned_ = true; }
   uint16_t overrideMask() const { return override_mask_; }
 
  private:
   CRGB rgb565(uint16_t value) const;
   void setSquare(uint8_t square, const CRGB& colour);
   void render(uint32_t now_ms);
-  void renderAttract();
-  bool attractActive(uint32_t now_ms) const;
+  void renderIdle(uint32_t now_ms);
+  void renderUnprovisioned(uint32_t now_ms);
+  bool busIdle(uint32_t now_ms) const;
 
   Settings& settings_;
   Sensors& sensors_;
@@ -45,8 +49,8 @@ class Lighting {
   uint32_t identify_until_ms_ = 0;
   uint32_t next_frame_ms_ = 0;
   uint32_t last_bus_activity_ms_ = 0;
-  uint8_t attract_step_ = 0;
   bool render_requested_ = false;
+  bool unprovisioned_ = false;
 };
 
 }  // namespace quadrant

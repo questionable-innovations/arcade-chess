@@ -13,10 +13,23 @@ header and payload. Maximum payload is 112 bytes. ESP is `0x80`, quadrants are
 
 Only the ESP initiates. A quadrant responds only to its address, never to a
 broadcast, and copies the request sequence. Initial bus settings are 38,400 baud,
-8-N-1. ESP allows 700 microseconds turnaround and a 20 ms normal response deadline;
-calibration has its own longer lifecycle. Bytes arriving during LED refresh are a
-known hardware-validation gate, so the bring-up firmware prioritizes UART and caps
-LED refresh rate.
+8-N-1. The ESP allows 700 microseconds turnaround and a 50 ms normal response
+deadline — a `SENSOR_SNAPSHOT` reply alone is ~60 encoded bytes, 16 ms of wire
+time, before the node's own scan-loop latency. Requests that make the node commit
+EEPROM (`CONFIG_SET`, `SET_BRIGHTNESS`, `FW_PREPARE`, `FW_ENTER_BOOTLOADER`) and
+status polls during calibration get 300 ms instead: `saveSettings` rewrites a
+72-byte record byte-wise and the first write after a node comes online can block
+it for ~240 ms. `GET_RAW_SCAN` and calibration have their own longer lifecycles.
+
+Exactly one transmitter at a time is the invariant the shared return line
+depends on, and the ESP keeps exactly one transaction outstanding. A node that
+stalled past the deadline therefore answers **only the newest addressed request
+it has buffered**: anything queued behind a request proves the ESP gave up on it
+and re-armed the bus for another node, so replying would put two transmitters on
+the line. Broadcasts carry no reply and always run in arrival order. Bytes
+arriving during LED refresh are a known hardware-validation gate, so a quadrant
+shifts its strips only inside the `RENDER_WINDOW` the ESP opens, never on a
+local timer that would drift out of that window.
 
 ## Message payloads
 
@@ -64,10 +77,12 @@ layer and expire using `duration_ms`; zero means persist until cleared.
 
 Rendering is normally driven by the ESP's `RENDER_WINDOW` broadcast, so a node
 with no ESP on the bus would otherwise sit dark. After three seconds without a
-single inbound byte a live quadrant self-drives an attract animation: a rainbow
-comet sweeps every square and edge pixel, with live sensor hits drawn over it so
-squares stay testable standalone. The first inbound byte stops it and normal
-render-window pacing resumes.
+single inbound byte a live quadrant self-drives an idle breath: each LED output
+holds one fixed hue — primary red, secondary green, edge A blue, edge B amber —
+and all four fade up and down together on a five-second cycle, so the strips
+show the node is alive and which pin drives which chain. Settled pieces are
+drawn over the breath at full value, so squares stay testable standalone. The
+first inbound byte ends it and normal render-window pacing resumes.
 
 Configuration keys are enter threshold `1` (ADC counts), exit threshold `2`,
 debounce scans `3`, mux settling microseconds `4`, full scan target milliseconds
@@ -103,8 +118,12 @@ of range, `10` calibration in progress, `11` raw capture in progress, and `12` a
 response is already outstanding. A broadcast `FW_PREPARE` cannot reply, so a node
 that refuses one latches the same code in `FW_PREFLIGHT`'s `last_broadcast_refusal`
 (`0` = accepted); it is cleared by each `MAINTENANCE_BEGIN`. Parsers count all
-bad COBS, length, version, CRC, and destination failures; counters saturate rather
-than wrapping.
+bad COBS, length, version, and CRC failures; counters saturate rather than
+wrapping. A destination mismatch is **not** an error — on a multidrop bus three
+of every four frames are addressed elsewhere — so it is skipped silently and
+`rx_good` counts every frame that decoded, not only the ones this node answered.
+Both counters are reported in `STATUS` and surface as `node_rx_good` /
+`node_rx_bad` in the `node.status` WebSocket event.
 
 ## Bootloader handoff and UART flashing
 

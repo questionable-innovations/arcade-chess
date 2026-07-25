@@ -406,6 +406,10 @@ void AvrFlasher::finishSuccess() {
 void AvrFlasher::fail(const char* reason) {
   Serial.printf("FLASH FAIL node=%u phase=%u reason=%s\n", node_,
                 static_cast<unsigned>(phase_), reason);
+  char message[64];
+  snprintf(message, sizeof(message), "flash failed in phase=%u: %s",
+           static_cast<unsigned>(phase_), reason);
+  bus_->log("error", "flash", message, node_);
   bus_->setRawScansBlocked(false);
   if (bus_baud_switched_) restoreBusBaud();
   if (phase_ >= Phase::kAwaitHandoff) {

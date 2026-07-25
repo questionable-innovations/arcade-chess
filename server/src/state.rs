@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::Json;
@@ -22,6 +22,9 @@ const MAX_TRACKED_UNKNOWN_TYPES: usize = 64;
 /// Minimum spacing between client-connect-triggered snapshot refreshes, so a
 /// reconnect-looping browser cannot spam devices with `board.snapshot.get`.
 const SNAPSHOT_REQUEST_DEBOUNCE_MS: u64 = 2_000;
+/// Bounds the per-device node-transition journal. Kept separate from `recent`,
+/// which a live bus trace rotates through in a few seconds.
+const NODE_EVENTS_MAX: usize = 64;
 
 /// Per-device state accumulated from the device WebSocket. Envelopes are stored
 /// verbatim so the client `init`/`event` fan-out matches what the device sent.
@@ -33,6 +36,7 @@ pub struct DeviceEntry {
     pub device_status: Option<Value>,
     pub node_status: [Option<Value>; 4],
     pub recent: VecDeque<Value>,
+    pub node_events: VecDeque<NodeEvent>,
     pub boot_id: Option<String>,
     pub last_seq: Option<u32>,
     pub cmd_tx: Option<mpsc::UnboundedSender<String>>,
@@ -41,6 +45,18 @@ pub struct DeviceEntry {
     pub session: u64,
     pub last_active_ms: u64,
     pub last_snapshot_req_ms: u64,
+}
+
+/// One node transition worth a post-mortem, stamped with server wall clock:
+/// every other record here is latest-value-only and carries device millis.
+#[derive(Clone, Copy, Serialize)]
+pub struct NodeEvent {
+    pub unix_ms: u64,
+    pub node: u8,
+    pub online: bool,
+    pub reset_cause: u8,
+    pub timeouts: u32,
+    pub event_overflow: u32,
 }
 
 /// Wire shape for `init.devices[]` and `GET /api/state`.
@@ -53,6 +69,7 @@ pub struct DeviceView {
     pub node_status: [Option<Value>; 4],
     pub device_status: Option<Value>,
     pub recent: Vec<Value>,
+    pub node_events: Vec<NodeEvent>,
 }
 
 pub enum DeviceLookup {
@@ -69,6 +86,7 @@ pub struct AppState {
     pub oversized_dropped: AtomicU64,
     pub admin_password: String,
     pub device_token: Option<String>,
+    started: Instant,
     logged_unknown_types: Mutex<HashSet<String>>,
 }
 
@@ -83,6 +101,7 @@ impl AppState {
             oversized_dropped: AtomicU64::new(0),
             admin_password,
             device_token,
+            started: Instant::now(),
             logged_unknown_types: Mutex::new(HashSet::new()),
         }
     }
@@ -99,6 +118,20 @@ impl AppState {
     pub fn snapshot_views(&self) -> Vec<DeviceView> {
         let devices = self.devices.lock().expect("devices lock");
         devices.iter().map(|(id, e)| view(id, e)).collect()
+    }
+
+    pub fn device_count(&self) -> usize {
+        self.devices.lock().expect("devices lock").len()
+    }
+
+    /// Server-side counters for `init` and `GET /api/state`; without these the
+    /// only record of a dropped oversized frame is a log nobody reads.
+    pub fn server_view(&self) -> Value {
+        json!({
+            "oversized_dropped": self.oversized_dropped.load(Ordering::Relaxed),
+            "device_count": self.device_count(),
+            "uptime_ms": self.started.elapsed().as_millis() as u64,
+        })
     }
 
     /// Registers a connection and returns its session generation, or `None`
@@ -161,6 +194,17 @@ impl AppState {
             device_id = %device_id,
             unknown_type = %etype,
             "ignoring device event with unrecognized type"
+        );
+        // Also surface it to browsers: firmware/server version skew is otherwise
+        // invisible on the only console anyone actually watches.
+        self.broadcast_msg(
+            json!({
+                "type": "error",
+                "reason": "unknown_event_type",
+                "etype": etype,
+                "device_id": device_id,
+            })
+            .to_string(),
         );
     }
 
@@ -241,6 +285,27 @@ impl AppState {
                     .and_then(Value::as_u64);
                 if let Some(n) = node {
                     if (n as usize) < 4 {
+                        let cur = node_marks(event);
+                        let prev = entry.node_status[n as usize].as_ref().map(node_marks);
+                        // A steady heartbeat repeats the same marks; only journal
+                        // the edges, so 64 slots cover hours rather than minutes.
+                        let changed = match prev {
+                            Some(p) => (p.0, p.1, p.3) != (cur.0, cur.1, cur.3),
+                            None => true,
+                        };
+                        if changed {
+                            entry.node_events.push_back(NodeEvent {
+                                unix_ms: now_ms(),
+                                node: n as u8,
+                                online: cur.0,
+                                reset_cause: cur.1,
+                                timeouts: cur.2,
+                                event_overflow: cur.3,
+                            });
+                            while entry.node_events.len() > NODE_EVENTS_MAX {
+                                entry.node_events.pop_front();
+                            }
+                        }
                         entry.node_status[n as usize] = Some(event.clone());
                     }
                 }
@@ -288,7 +353,28 @@ fn evict_oldest_disconnected(devices: &mut HashMap<String, DeviceEntry>) {
     }
 }
 
-fn now_ms() -> u64 {
+/// `(online, reset_cause, timeouts, node_event_overflow)` from a `node.status`
+/// envelope; missing fields read as zero so older firmware still journals.
+fn node_marks(event: &Value) -> (bool, u8, u32, u32) {
+    let data = event.get("data");
+    let num = |key: &str| {
+        data.and_then(|d| d.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    let online = data
+        .and_then(|d| d.get("online"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (
+        online,
+        num("reset_cause") as u8,
+        num("timeouts") as u32,
+        num("node_event_overflow") as u32,
+    )
+}
+
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -304,6 +390,7 @@ fn view(id: &str, e: &DeviceEntry) -> DeviceView {
         node_status: e.node_status.clone(),
         device_status: e.device_status.clone(),
         recent: e.recent.iter().cloned().collect(),
+        node_events: e.node_events.iter().copied().collect(),
     }
 }
 
@@ -320,5 +407,63 @@ pub fn random_hex() -> String {
 }
 
 pub async fn api_state(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({ "devices": state.snapshot_views() }))
+    Json(json!({ "devices": state.snapshot_views(), "server": state.server_view() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_status(online: bool, reset_cause: u64, overflow: u64) -> Value {
+        json!({
+            "type": "node.status",
+            "data": {
+                "node": 1,
+                "online": online,
+                "reset_cause": reset_cause,
+                "timeouts": 7,
+                "node_event_overflow": overflow,
+            }
+        })
+    }
+
+    #[test]
+    fn node_journal_records_only_transitions() {
+        let state = AppState::new("pw".to_string(), None);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = state.register_device("dev", json!({}), tx).expect("register");
+        for event in [
+            node_status(true, 0, 0),
+            node_status(true, 0, 0),
+            node_status(false, 0, 0),
+            node_status(true, 3, 1),
+        ] {
+            state
+                .ingest_event("dev", session, "node.status", None, None, &event)
+                .expect("ingest");
+        }
+
+        let views = state.snapshot_views();
+        let journal = &views[0].node_events;
+        assert_eq!(journal.len(), 3);
+        assert!(!journal[1].online);
+        assert_eq!(journal[2].reset_cause, 3);
+        assert_eq!(journal[2].event_overflow, 1);
+        assert_eq!(journal[2].timeouts, 7);
+    }
+
+    #[test]
+    fn node_journal_is_bounded() {
+        let state = AppState::new("pw".to_string(), None);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = state.register_device("dev", json!({}), tx).expect("register");
+        for i in 0..(NODE_EVENTS_MAX as u64 * 2) {
+            let event = node_status(i % 2 == 0, 0, 0);
+            state
+                .ingest_event("dev", session, "node.status", None, None, &event)
+                .expect("ingest");
+        }
+
+        assert_eq!(state.snapshot_views()[0].node_events.len(), NODE_EVENTS_MAX);
+    }
 }
