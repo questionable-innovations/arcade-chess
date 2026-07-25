@@ -91,9 +91,28 @@ def expect(port: serial.Serial, token: str, timeout_s: float) -> str:
     fatal(f"timed out waiting for '{token}'")
 
 
+def await_ack(port: serial.Serial, index: int, total: int, timeout_s: float) -> None:
+    """Wait for a record ack, ignoring asynchronous ESP log chatter."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        line = read_line(port, deadline - time.monotonic())
+        if not line:
+            continue
+        if line == "+":
+            return
+        if "FLASH FAIL" in line:
+            fatal(line)
+        print(f"  esp: {line}")
+    fatal(f"record {index + 1}/{total}: timed out waiting for ack")
+
+
 def flash_target(port: serial.Serial, command: str, label: str,
                  lines: list[str], hex_name: str) -> None:
     print(f"== {label} ==")
+    # An interrupted run can leave the ESP in hex-receive mode, where the next
+    # command line would be parsed as a (bad) HEX record.
+    port.write(b"fw-abort\n")
+    time.sleep(0.3)
     port.reset_input_buffer()
     port.write(f"{command}\n".encode())
     expect(port, "HEX-READY", 5)
@@ -101,11 +120,7 @@ def flash_target(port: serial.Serial, command: str, label: str,
     print(f"uploading {hex_name}: {len(lines)} records")
     for index, line in enumerate(lines[:-1]):
         port.write(line.encode() + b"\n")
-        reply = read_line(port, 5)
-        if reply != "+":
-            if "FLASH FAIL" in reply:
-                fatal(reply)
-            fatal(f"record {index + 1}/{len(lines)}: expected '+', got '{reply}'")
+        await_ack(port, index, len(lines), 5)
         if (index + 1) % 200 == 0:
             print(f"  {index + 1}/{len(lines)} records")
     port.write(lines[-1].encode() + b"\n")  # EOF record triggers the handoff

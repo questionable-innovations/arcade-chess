@@ -28,6 +28,14 @@ env.BoardConfig().update("build.f_cpu", CLOCK_PROFILE["f_cpu"])
 env.BoardConfig().update("hardware.oscillator", CLOCK_PROFILE["oscillator"])
 env.Replace(BOARD_F_CPU=CLOCK_PROFILE["f_cpu"])
 
+# Pre-build scripts run before the AVR builder renames PROGNAME from the
+# "program" default to "firmware", and AddCustomTarget resolves `dependencies`
+# eagerly. Apply the same rename here so the targets depend on the hex file that
+# actually gets built.
+if env.get("PROGNAME", "program") == "program":
+    env.Replace(PROGNAME="firmware")
+TARGET_HEX = env.subst("$BUILD_DIR/${PROGNAME}.hex")
+
 REPO_ROOT = Path(env["PROJECT_DIR"]).resolve()
 while REPO_ROOT.parent != REPO_ROOT and not (REPO_ROOT / "tools" / "pio-targets.py").is_file():
     REPO_ROOT = REPO_ROOT.parent
@@ -51,21 +59,16 @@ def add_protocol_tests() -> None:
 if env["PIOENV"] == "ATmega328PB":
     env.AddCustomTarget(
         name="flash_all_quadrants_simultaneous",
-        dependencies="$BUILD_DIR/${PROGNAME}.hex",
-        actions=[
-            f'"{TOOLS}/flash-quadrant.py" --simultaneous --hex "$BUILD_DIR/${{PROGNAME}}.hex"'
-        ],
+        dependencies=TARGET_HEX,
+        actions=[f'"{TOOLS}/flash-quadrant.py" --simultaneous --hex "{TARGET_HEX}"'],
         title="Flash all quadrants simultaneously (ESP USB)",
         description="Program every attached quadrant from one shared Urprotocol stream",
     )
     for node in range(QUADRANT_COUNT):
         env.AddCustomTarget(
             name=f"flash_quadrant_{node}",
-            dependencies="$BUILD_DIR/${PROGNAME}.hex",
-            actions=[
-                f'"{TOOLS}/flash-quadrant.py" --node {node} '
-                '--hex "$BUILD_DIR/${PROGNAME}.hex"'
-            ],
+            dependencies=TARGET_HEX,
+            actions=[f'"{TOOLS}/flash-quadrant.py" --node {node} --hex "{TARGET_HEX}"'],
             title=f"Flash quadrant {node} (ESP USB)",
             description="Build, then program via the ESP console fw-flash path",
         )
