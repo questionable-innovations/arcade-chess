@@ -26,9 +26,11 @@ def main() -> None:
     identity = identity_without_crc + struct.pack("<H", crc16(identity_without_crc))
     image[0 : len(identity)] = identity
 
+    # Settings carry their own version (2: baseline/noise indexed by board
+    # geometry); identity and update markers stay on storage version 1.
     settings_without_crc = struct.pack(
         "<IBHHBHHBHHB16H16BBB",
-        0x51434346, 1, 70, 42, 3, 25, 16, 48, 0x07E0, 0x001F, 0,
+        0x51434346, 2, 70, 42, 3, 25, 16, 48, 0x07E0, 0x001F, 0,
         *([512] * 16), *([4] * 16), 0, 0,
     )
     settings = settings_without_crc + struct.pack("<H", crc16(settings_without_crc))

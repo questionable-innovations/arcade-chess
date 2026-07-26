@@ -206,6 +206,12 @@ missing-node information for every square.
 
 ## Calibration workflow
 
+Baselines are stored per square, so they are only meaningful against the square
+map that recorded them. Settings records carry their own version (2 = baselines
+indexed by board geometry); a node holding an older record loads defaults and
+reports uncalibrated rather than pinning stale baselines to the wrong squares.
+Expect to recalibrate any node flashed across that change.
+
 1. Remove every piece and magnet. Run `raw 16` repeatedly. Empty readings should
    be away from ADC rails and stable around their own baselines.
 2. Run `calibrate all`. Each AVR averages 128 scans, captures per-square baseline
@@ -214,10 +220,16 @@ missing-node information for every square.
    900, or noise above 40 ADC counts.
 4. Walk a known positive magnet across all squares. Settled squares should report
    positive and illuminate green. Reverse it; settled negative squares are blue.
+   The square that lights must be the one under the magnet: a lit neighbour means
+   the board map is wrong, not the calibration.
 5. Tune enter threshold (key 1), exit threshold (2), debounce scans (3), mux
    settling time (4), and full-scan time (5). Change one factor at a time while
    retaining frontend raw-scan captures.
-6. Use `identify` and walking-magnet tests to determine physical orientation.
+6. Use `identify`, the debug UI's **wave**, and walking-magnet tests to determine
+   physical orientation. The wave sweeps a lit file left to right and then a lit
+   rank bottom to top; because it drives global squares it exercises the whole
+   chain — global square, node, local square, LED — so a quadrant sitting in the
+   wrong corner or turned the wrong way lights a whole 4x4 block out of step.
    Persist orientation key 9 and then freeze the ESP global coordinate map.
 
 The ESP discovers each quadrant independently. Empty addresses are probed with

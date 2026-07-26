@@ -72,6 +72,28 @@ Each of the 16 squares on the chessboard contains an SS49E linear Hall effect se
 - `SenseA` $->$ PC0 / ADC0 / pin 23.
 - `SenseB` $->$ PC1 / ADC1 / pin 24.
 
+*Mux channel order*
+
+Neither mux is wired in designator order, and the two disagree with each other.
+Firmware must translate the channel counter rather than assume `SENSE[n+1]` sits
+on channel `n`:
+
+#align(center)[
+  #table(
+    columns: (auto, auto, auto, auto, auto, auto, auto, auto, auto),
+    inset: 6pt,
+    align: horizon,
+    [*Channel*], [0], [1], [2], [3], [4], [5], [6], [7],
+    [*B1 (`SenseA`)*], [`SENSE2`], [`SENSE3`], [`SENSE4`], [`SENSE1`],
+      [`SENSE5`], [`SENSE6`], [`SENSE7`], [`SENSE8`],
+    [*B2 (`SenseB`)*], [`SENSE9`], [`SENSE10`], [`SENSE11`], [`SENSE12`],
+      [`SENSE13`], [`SENSE14`], [`SENSE15`], [`SENSE16`],
+  )
+]
+
+B1 carries the rotation because `Y3` (pin 12) takes `SENSE1` while `Y0`-`Y2`
+(pins 13-15) take `SENSE2`-`SENSE4`. `SENSE`$n$ belongs to `SSM`$n$.
+
 == Hall Effect Amplification & Polarity Detection
 The raw output from the SS49E Hall effect sensors centers around 2.5V (quiescent state, no magnetic field). To maximize the resolution of the ATMega's ADC and accurately determine magnetic polarity, the `RawSense` signals are passed through TLC082CDR operational amplifiers. 
 
@@ -120,9 +142,39 @@ Each quadrant therefore owns 80 pixels and requires approximately 2.4 ms of
 WS2812 wire time for a full refresh. Firmware must coordinate UART traffic with any
 driver that disables interrupts during transmission.
 
-The edge half-bar schematic designator order is `LED5`, `LED6`, `LED7`, `LED9`,
-`LED8`, `LED10`, `LED11`, `LED12`. Confirm the physical direction with a walking
-pixel test.
+The edge half-bar chains `LED5`, `LED6`, `LED7`, `LED9`, `LED8`, `LED10`,
+`LED11`, `LED12` while the parts sit in designator order along the bar, so
+pixels 3 and 4 are transposed with respect to physical position. Confirm the
+direction the bar runs with a walking pixel test.
+
+== Smart square placement and chain order
+
+`SDI_P` feeds `SSM1` and each `DO_P` chains to the next module in designator
+order, so the primary strip is `SSM1.LED1`, `SSM1.LED2`, `SSM2.LED1`, ... The
+secondary strip runs the same order over `LED3` and `LED4`.
+
+The modules are *placed* in a boustrophedon, so designator order is not
+row-major. Row 0 is the LED-bar edge and column 0 is on the left:
+
+#align(center)[
+  #table(
+    columns: (auto, auto, auto, auto),
+    inset: 10pt,
+    align: horizon,
+    [`SSM1`], [`SSM2`], [`SSM3`], [`SSM4`],
+    [`SSM8`], [`SSM7`], [`SSM6`], [`SSM5`],
+    [`SSM9`], [`SSM10`], [`SSM11`], [`SSM12`],
+    [`SSM16`], [`SSM15`], [`SSM14`], [`SSM13`],
+  )
+]
+
+Alternating the rows keeps every chain hop between physical neighbours: `SSM4`
+drops straight down to `SSM5`, `SSM8` down to `SSM9`, `SSM12` down to `SSM13`.
+
+Firmware holds all of this in `firmware-atmega/src/board_map.h`, which is the
+only place designator or mux order is allowed to appear. Every square index on
+the UART wire is geometric — row-major, row 0 on the LED-bar edge — which is
+what the ESP's `globalSquare()` rotation already assumes.
 
 = Expansion Connector
 
@@ -137,8 +189,13 @@ ESD behavior, grounding, and unpowered-node line loading before supporting modul
 - Apply and continuity-check the independent PE0/PE1 edge-bar bodge.
 - Provision unique quadrant IDs 0-3 during initial ISP flashing.
 - Verify ESP32 3.3 V high is accepted by every 5 V AVR RX input.
-- Determine quadrant rotation, local-square mapping, LED orientation, and edge-bar
-  direction from assembled hardware rather than schematic designators alone.
+- Confirm the placement table above against an assembled board with a walking
+  magnet: the lit square must be the square the magnet is on. Mux order and
+  chain order come from the schematic and are not in doubt; which physical
+  corner is row 0, column 0 is a placement call and is the part worth checking.
+- Determine quadrant rotation and edge-bar direction from assembled hardware.
+  Quadrant rotation stays a per-node `orientation` setting (key 9); it is not
+  part of the board map.
 
 = Power Management
 - *Input*: 5V supplied via a USB-C interface. 

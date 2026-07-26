@@ -125,6 +125,10 @@
 		return 'cal';
 	}
 
+	function onWave() {
+		if (selected) ws.wave(selected.device_id);
+	}
+
 	// Streaming and the heatmap go together — turning the live scan on lights it up.
 	function toggleStream() {
 		if (!selected) return;
@@ -317,15 +321,26 @@
 				<div class="card">
 					<div class="cardhead">
 						<h3>Quadrants</h3>
-						<button
-							class="chip"
-							class:arm={calArm === 'all'}
-							disabled={!ws.authed || !selected}
-							onclick={() => onCalibrate('all')}
-							title="calibrate every online quadrant (board must be empty)"
-						>
-							{calArm === 'all' ? 'board empty?' : 'calibrate all'}
-						</button>
+						<div class="chips">
+							<button
+								class="chip"
+								class:active={ws.waving}
+								disabled={!ws.authed || !selected}
+								onclick={onWave}
+								title="sweep a lit file left to right, then a lit rank bottom to top"
+							>
+								{ws.waving ? 'sweeping' : 'wave'}
+							</button>
+							<button
+								class="chip"
+								class:arm={calArm === 'all'}
+								disabled={!ws.authed || !selected}
+								onclick={() => onCalibrate('all')}
+								title="calibrate every online quadrant (board must be empty)"
+							>
+								{calArm === 'all' ? 'board empty?' : 'calibrate all'}
+							</button>
+						</div>
 					</div>
 					<ul class="nodes">
 						{#each [0, 1, 2, 3] as n (n)}
@@ -391,7 +406,15 @@
 							</li>
 						{/each}
 					</ul>
-					{#if !ws.authed}<p class="note">authenticate as admin to calibrate</p>{/if}
+					{#if ws.authed}
+						<p class="note">
+							wave sweeps blue by file (a&rarr;h), then amber by rank (1&rarr;8). Every square
+							should light exactly once per pass, in order; one lighting out of step is a board-map
+							fault, not a calibration fault.
+						</p>
+					{:else}
+						<p class="note">authenticate as admin to calibrate</p>
+					{/if}
 				</div>
 
 				<div class="card">
@@ -651,6 +674,10 @@
 	}
 	.cardhead h3 {
 		margin: 0;
+	}
+	.chips {
+		display: flex;
+		gap: 6px;
 	}
 	.chip {
 		height: 22px;

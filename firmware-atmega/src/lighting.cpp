@@ -1,5 +1,6 @@
 #include "lighting.h"
 
+#include "board_map.h"
 #include "bringup_config.h"
 
 namespace quadrant {
@@ -24,7 +25,7 @@ CRGB Lighting::rgb565(uint16_t c) const {
 }
 
 void Lighting::setSquare(uint8_t square, const CRGB& value) {
-  const uint8_t first = static_cast<uint8_t>(square * bringup::kPixelsPerSquare);
+  const uint8_t first = board_map::firstPixelForSquare(square);
   primary_[first] = value;
   primary_[first + 1] = value;
   secondary_[first] = value;

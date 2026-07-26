@@ -28,6 +28,18 @@ const AUTH_PASSWORD_KEY_PREFIX = 'arcade-chess.admin-password:';
 const LIVENESS_CHECK_MS = 10000;
 const LIVENESS_TIMEOUT_MS = 60000;
 
+// Board-map sweep. One pass per axis, because a single sweep only proves one of
+// them: the file pass pins each square's column, the rank pass pins its row.
+// A square that lights out of step is mismapped, not miscalibrated.
+const WAVE_FILE_FRAMES = 8;
+const WAVE_FRAMES = WAVE_FILE_FRAMES + 8;
+const WAVE_STEP_MS = 140;
+// Longer than a step so a late frame leaves no gap, and short enough that the
+// sweep self-clears on the nodes if the socket dies mid-run.
+const WAVE_HOLD_MS = 260;
+const WAVE_FILE_COLOUR = '00a0ff';
+const WAVE_RANK_COLOUR = 'ffa000';
+
 const SERVER_ERRORS: Record<string, { text: string; level: TickEntry['level'] }> = {
 	shed_slow_client: { text: 'dropped by server: this client could not keep up', level: 'error' },
 	shed_lagged: { text: 'dropped by server: fell behind the event stream', level: 'error' },
@@ -166,9 +178,17 @@ class WsStore {
 	#traceWanted = $state(false);
 	#streamReported = $state<boolean | null>(null);
 	#traceReported = $state<boolean | null>(null);
+	// Purely local: the sweep is a client-driven sequence, so there is no device
+	// report to reconcile against.
+	#waving = $state(false);
+	#waveTimer: ReturnType<typeof setTimeout> | null = null;
 
 	get streaming(): boolean {
 		return this.#streamReported ?? this.#streamWanted;
+	}
+
+	get waving(): boolean {
+		return this.#waving;
 	}
 
 	get tracing(): boolean {
@@ -199,6 +219,11 @@ class WsStore {
 	// Release every timer and the socket; connect() may be called again after.
 	teardown(): void {
 		this.#started = false;
+		this.#waving = false;
+		if (this.#waveTimer) {
+			clearTimeout(this.#waveTimer);
+			this.#waveTimer = null;
+		}
 		if (this.#stableTimer) {
 			clearTimeout(this.#stableTimer);
 			this.#stableTimer = null;
@@ -272,6 +297,57 @@ class WsStore {
 		if (enabled) this.busFrames = [];
 	}
 
+	// Sweep a lit file left to right, then a lit rank bottom to top, to prove the
+	// board map end to end: global square -> node -> local square -> LED chain.
+	// Calling it again while running stops it.
+	wave(deviceId: string): void {
+		if (this.#waving) return this.stopWave(deviceId);
+		this.#waving = true;
+		let frame = 0;
+		const step = () => {
+			this.#waveTimer = null;
+			if (!this.#waving) return;
+			if (frame >= WAVE_FRAMES) return this.stopWave(deviceId);
+			// Board indices are row * 8 + col, row 0 = rank 1, col 0 = file a.
+			const files = frame < WAVE_FILE_FRAMES;
+			const line = files ? frame : frame - WAVE_FILE_FRAMES;
+			const squares: number[] = [];
+			for (let n = 0; n < 8; n++) squares.push(files ? n * 8 + line : line * 8 + n);
+			const sent = this.#send({
+				type: 'command',
+				device_id: deviceId,
+				name: 'lighting.set',
+				args: {
+					squares,
+					effect: 'solid',
+					colour: files ? WAVE_FILE_COLOUR : WAVE_RANK_COLOUR,
+					duration_ms: WAVE_HOLD_MS
+				}
+			});
+			// A dead socket would otherwise leave the timer spinning against nothing.
+			if (!sent) {
+				this.#waving = false;
+				this.#pushInfo('wave stopped — link is down', 'warn');
+				return;
+			}
+			frame++;
+			this.#waveTimer = setTimeout(step, WAVE_STEP_MS);
+		};
+		step();
+	}
+
+	// Safe to call unconditionally; the explicit clear covers a stop mid-sweep,
+	// where the last few lines still hold their override.
+	stopWave(deviceId: string): void {
+		if (this.#waveTimer) {
+			clearTimeout(this.#waveTimer);
+			this.#waveTimer = null;
+		}
+		if (!this.#waving) return;
+		this.#waving = false;
+		this.#send({ type: 'command', device_id: deviceId, name: 'lighting.clear', args: {} });
+	}
+
 	// Toggle continuous raw voltage streaming for the live debug readout.
 	setStream(deviceId: string, enabled: boolean): void {
 		const sent = this.#send({
@@ -322,6 +398,13 @@ class WsStore {
 			this.#traceWanted = false;
 			this.#streamReported = null;
 			this.#traceReported = null;
+			// The sweep is driven from here, so a dropped link strands it. Nodes
+			// expire their own override within WAVE_HOLD_MS, so no clear is needed.
+			this.#waving = false;
+			if (this.#waveTimer) {
+				clearTimeout(this.#waveTimer);
+				this.#waveTimer = null;
+			}
 			if (this.#stableTimer) {
 				clearTimeout(this.#stableTimer);
 				this.#stableTimer = null;

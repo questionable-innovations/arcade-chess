@@ -66,6 +66,17 @@ Noise and state use compact 8-bit fields. The ESP requests quadrants one at a ti
 quadrant takes the requested extra samples cooperatively, then responds; it never
 streams unsolicited data onto the shared return line.
 
+## Square indices
+
+Every square index on the wire — `POLL_EVENTS` records, `GET_SNAPSHOT` and
+`GET_RAW_SCAN` array positions, and `SET_SQUARES`/`CLEAR_LIGHTING` mask bits —
+is geometric: `row * 4 + column` inside the quadrant, row 0 on the LED-bar edge
+and column 0 on the left. It is not the smart-square designator order and not
+the mux scan order; the quadrant translates both in
+`firmware-atmega/src/board_map.h` so that index 5 means the same physical square
+to the ADC, the LED chain, and the ESP's `globalSquare()` rotation. See
+[board.typ](board.typ) for the placement and mux tables.
+
 ## Sensor state and LED defaults
 
 Sensor states are empty `0`, positive `1`, negative `2`, uncertain `3`. Stable

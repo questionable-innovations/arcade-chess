@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "board_map.h"
 #include "bringup_config.h"
 
 namespace quadrant {
@@ -46,8 +47,10 @@ void Sensors::tick(uint32_t now_us, uint32_t now_ms) {
 
   const uint16_t low = analogRead(A0);
   const uint16_t high = analogRead(A1);
-  const uint8_t low_index = channel_;
-  const uint8_t high_index = channel_ + bringup::kMuxChannelCount;
+  // Both muxes step through the same channel counter, but neither presents its
+  // squares in that order, so the sample is stored where the square lives.
+  const uint8_t low_index = board_map::kSquareForLowChannel[channel_];
+  const uint8_t high_index = board_map::kSquareForHighChannel[channel_];
   raw_[low_index] = low;
   raw_[high_index] = high;
   filtered_[low_index] = static_cast<uint16_t>(filtered_[low_index] +

@@ -11,6 +11,11 @@ constexpr uint32_t kIdentityMagic = 0x51434944UL;  // QCID
 constexpr uint32_t kSettingsMagic = 0x51434346UL;  // QCCF
 constexpr uint32_t kUpdateMagic = 0x51435550UL;    // QCUP
 constexpr uint8_t kStorageVersion = 1;
+// Versioned apart from the identity and update records so a meaning change
+// costs a recalibration rather than a re-provision. Version 2 reindexed
+// baseline[] and noise[] from mux scan order to board geometry; a version 1
+// record would pin every stale baseline to the wrong square.
+constexpr uint8_t kSettingsVersion = 2;
 constexpr uint16_t kCrcInitialValue = UINT16_MAX;
 constexpr uint16_t kCrcPolynomial = 0x1021;
 constexpr uint16_t kCrcTopBit = 0x8000;
@@ -53,7 +58,7 @@ bool loadIdentity(Identity& identity) {
 void loadDefaultSettings(Settings& s) {
   memset(&s, 0, sizeof(s));
   s.magic = kSettingsMagic;
-  s.version = kStorageVersion;
+  s.version = kSettingsVersion;
   s.enter_threshold = bringup::kDefaultEnterThreshold;
   s.exit_threshold = bringup::kDefaultExitThreshold;
   s.debounce_scans = bringup::kDefaultDebounceScans;
@@ -72,7 +77,7 @@ void loadDefaultSettings(Settings& s) {
 bool loadSettings(Settings& settings) {
   EEPROM.get(kSettingsEepromAddress, settings);
   const bool valid = settings.magic == kSettingsMagic &&
-      settings.version == kStorageVersion &&
+      settings.version == kSettingsVersion &&
       settings.enter_threshold >= bringup::kMinimumEnterThreshold &&
       settings.enter_threshold <= bringup::kMaximumEnterThreshold &&
       settings.exit_threshold < settings.enter_threshold &&
@@ -88,7 +93,7 @@ bool loadSettings(Settings& settings) {
 
 void saveSettings(Settings& settings) {
   settings.magic = kSettingsMagic;
-  settings.version = kStorageVersion;
+  settings.version = kSettingsVersion;
   settings.crc = storageCrc(reinterpret_cast<const uint8_t*>(&settings),
                             sizeof(settings) - sizeof(settings.crc));
   EEPROM.put(kSettingsEepromAddress, settings);
