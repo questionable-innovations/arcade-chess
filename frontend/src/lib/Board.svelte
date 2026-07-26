@@ -163,9 +163,7 @@
 			<div class="seam v"></div>
 			<div class="seam h"></div>
 			{#each NODE_INDICES as node (node)}
-				<span class="badge q{node} {nodeHealth(nodeStatus[node])}">
-					<span class="ring"></span>n{node}
-				</span>
+				<span class="badge q{node} {nodeHealth(nodeStatus[node])}">n{node}</span>
 			{/each}
 		{/if}
 	</div>
@@ -293,7 +291,7 @@
 		font-family: var(--font-mono);
 		background: rgba(8, 9, 10, 0.82);
 		border: 1px dashed color-mix(in srgb, var(--color-fault) 60%, var(--color-line));
-		border-radius: 999px;
+		border-radius: 6px;
 		backdrop-filter: blur(4px);
 		pointer-events: none;
 	}
@@ -315,14 +313,16 @@
 		filter: saturate(0.4);
 	}
 
+	/* An invalid reading is marked by a corner wedge rather than a lamp: it is a
+	   property of the square, not a device with a state. */
 	.flag {
 		position: absolute;
-		top: 3px;
-		right: 3px;
-		width: 5px;
-		height: 5px;
-		border-radius: 50%;
-		background: var(--color-warn);
+		top: 0;
+		right: 0;
+		width: 0;
+		height: 0;
+		border-top: 7px solid var(--color-warn);
+		border-left: 7px solid transparent;
 		opacity: 0.75;
 	}
 
@@ -357,40 +357,33 @@
 		transform: translateY(-0.5px);
 	}
 
+	/* Quadrant identity plus its health in one token — the colour is the state,
+	   so there is nothing to put a lamp beside. */
 	.badge {
 		position: absolute;
 		z-index: 3;
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		padding: 2px 7px;
+		padding: 2px 6px;
 		font-family: var(--font-mono);
 		font-size: 10px;
 		letter-spacing: 0.04em;
-		color: var(--color-fg-dim);
+		color: var(--color-fg-faint);
 		background: rgba(8, 9, 10, 0.72);
 		border: 1px solid var(--color-line);
-		border-radius: 999px;
+		border-radius: 4px;
 		backdrop-filter: blur(4px);
 		pointer-events: none;
 	}
-	.badge .ring {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--color-fg-faint);
-	}
-	.badge.healthy .ring {
-		background: var(--color-live);
-	}
-	.badge.uncalibrated .ring {
-		background: var(--color-warn);
-	}
-	.badge.offline .ring {
-		background: var(--color-fault);
-	}
 	.badge.healthy {
-		color: var(--color-fg);
+		color: var(--color-live);
+		border-color: color-mix(in srgb, var(--color-live) 32%, var(--color-line));
+	}
+	.badge.uncalibrated {
+		color: var(--color-warn);
+		border-color: color-mix(in srgb, var(--color-warn) 36%, var(--color-line));
+	}
+	.badge.offline {
+		color: var(--color-fault);
+		border-color: color-mix(in srgb, var(--color-fault) 40%, var(--color-line));
 	}
 	/* Badge positions must match the cell→node attribution above: node 0 owns
 	   ranks 1-4 files a-d (bottom-left on screen), node 3 the top-right. */

@@ -75,9 +75,10 @@
 			{@const cal = device?.calibration[n]}
 			<li>
 				<div class="nrow">
-					<span class="ring {h}" class:pulse={cal?.active}></span>
 					<span class="nname tnum">{nodeLabel[n]}</span>
-					<span class="nstate {h}">{cal?.active ? 'calibrating' : h}</span>
+					<span class="nstate {h}" class:pulse={cal?.active}>
+						{cal?.active ? 'calibrating' : h}
+					</span>
 					<span class="nfw tnum">{d?.firmware ?? ''}</span>
 					<button
 						class="chip ncal"
@@ -126,9 +127,8 @@
 	</ul>
 	{#if ws.authed}
 		<p class="note">
-			wave sweeps blue by file (a&rarr;h), then amber by rank (1&rarr;8). Every square should light
-			exactly once per pass, in order; one lighting out of step is a board-map fault, not a
-			calibration fault.
+			wave sweeps blue by file (a&rarr;h), then amber by rank (1&rarr;8). A square lighting out of
+			order is a board-map fault, not a calibration fault.
 		</p>
 	{:else}
 		<p class="note">authenticate as admin to calibrate</p>
@@ -144,7 +144,7 @@
 		margin-left: 8px;
 		min-width: 5ch;
 	}
-	.ring.pulse {
+	.pulse {
 		animation: cal-pulse 1s ease-in-out infinite;
 	}
 	@keyframes cal-pulse {
@@ -177,30 +177,11 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
-		padding-left: 17px;
 		font-size: 10px;
 		color: var(--color-fg-ghost);
 	}
 	.nstats .warn {
 		color: var(--color-warn);
-	}
-	.ring {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		flex: none;
-		background: var(--color-fg-ghost);
-	}
-	.ring.healthy {
-		background: var(--color-live);
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-live) 16%, transparent);
-	}
-	.ring.uncalibrated {
-		background: var(--color-warn);
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-warn) 16%, transparent);
-	}
-	.ring.offline {
-		background: var(--color-fault);
 	}
 	.nname {
 		color: var(--color-fg);

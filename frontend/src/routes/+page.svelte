@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import AppHeader from '$lib/AppHeader.svelte';
 	import Board from '$lib/Board.svelte';
 	import Console from '$lib/Console.svelte';
@@ -36,6 +38,8 @@
 			const el = e.target as HTMLElement | null;
 			if (el && /^(INPUT|TEXTAREA)$/.test(el.tagName)) return;
 			if (e.key === 'd' || e.key === 'D') debug = !debug;
+			// The dashboard is the tool; the game is the point. One key away.
+			if (e.key === 'g' || e.key === 'G') goto(resolve('/game'));
 		};
 		window.addEventListener('keydown', onKey);
 		return () => {

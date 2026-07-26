@@ -31,11 +31,11 @@
 	<div class="cardhead">
 		<h3>Setup</h3>
 		{#if countdown != null}
-			<span class="chip active tnum">starting in {Math.max(1, Math.ceil(countdown / 1000))}</span>
+			<span class="stat ok tnum">starting in {Math.max(1, Math.ceil(countdown / 1000))}</span>
 		{:else if game.detect.sensors_live}
-			<span class="chip">watching the board</span>
+			<span class="stat">watching the board</span>
 		{:else}
-			<span class="chip bad">manual mode</span>
+			<span class="stat bad">manual mode</span>
 		{/if}
 	</div>
 
@@ -130,24 +130,19 @@
 	}
 	.tag {
 		display: inline-block;
-		font-size: 9px;
-		letter-spacing: 0.08em;
+		font-size: 9.5px;
+		letter-spacing: 0.09em;
 		text-transform: uppercase;
-		border-radius: 999px;
-		padding: 1px 7px;
-		margin-right: 6px;
+		margin-right: 8px;
 	}
 	.tag.warn {
 		color: var(--color-warn);
-		border: 1px solid color-mix(in srgb, var(--color-warn) 45%, var(--color-line));
 	}
 	.tag.bad {
 		color: var(--color-fault);
-		border: 1px solid color-mix(in srgb, var(--color-fault) 45%, var(--color-line));
 	}
 	.tag.dim {
 		color: var(--color-fg-faint);
-		border: 1px solid var(--color-line);
 	}
 
 	.start {

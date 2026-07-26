@@ -40,7 +40,7 @@
 			console
 		</button>
 		<button class="title tab" class:on={view === 'bus'} onclick={() => (view = 'bus')}>
-			bus{#if ws.tracing}<span class="livedot"></span>{/if}
+			bus
 		</button>
 		<span class="chain tnum" title="browser → server → device → quadrants">
 			<span class="seg" class:ok={ws.connected} class:bad={!ws.connected}>ws</span>
@@ -104,7 +104,7 @@
 				</div>
 			{:else}
 				<div class="empty">
-					{ws.tracing ? 'waiting for frames…' : 'enable Trace in the rail to capture UART frames'}
+					{ws.tracing ? 'waiting for frames…' : 'press trace to capture UART frames'}
 				</div>
 			{/each}
 		</div>
@@ -149,14 +149,8 @@
 	.tab.on {
 		color: var(--color-fg);
 	}
-	.livedot {
-		width: 5px;
-		height: 5px;
-		border-radius: 50%;
-		background: var(--color-live);
-	}
 	.trace {
-		height: 20px;
+		height: 21px;
 		padding: 0 9px;
 		font-family: var(--font-mono);
 		font-size: 10px;
@@ -164,7 +158,7 @@
 		color: var(--color-fg-faint);
 		background: var(--color-surface-2);
 		border: 1px solid var(--color-line);
-		border-radius: 999px;
+		border-radius: 5px;
 		cursor: pointer;
 	}
 	.trace:disabled {

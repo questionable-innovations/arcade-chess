@@ -13,6 +13,10 @@
 	const moveNumber = $derived(Math.floor(game.ply / 2) + 1);
 	const totalMoves = $derived(Math.ceil(game.max_ply / 2));
 
+	// The side-to-move token means something only while there is a side to move;
+	// beside "Game over" it was just a circle.
+	const showTurn = $derived(game.phase === 'playing' || game.phase === 'awaiting_choice');
+
 	const headline = $derived.by(() => {
 		switch (game.phase) {
 			case 'idle':
@@ -57,11 +61,7 @@
 	<!-- `degraded` is a product feature, not debug output: it gives the
 	     presenter something honest to say when a subsystem drops. -->
 	{#if game.degraded.length}
-		<div class="chips">
-			{#each game.degraded as code (code)}
-				<span class="chip">{degradedLabel(code)}</span>
-			{/each}
-		</div>
+		<p class="degraded">{game.degraded.map(degradedLabel).join(' · ')}</p>
 	{/if}
 </div>
 
@@ -102,21 +102,11 @@
 		font-size: 13px;
 		color: var(--color-fg-dim);
 	}
-	.chips {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-		justify-content: center;
-		margin-top: 4px;
-	}
-	.chip {
+	.degraded {
+		margin: 2px 0 0;
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 11px;
 		letter-spacing: 0.03em;
 		color: var(--color-warn);
-		background: color-mix(in srgb, var(--color-warn) 10%, transparent);
-		border: 1px solid color-mix(in srgb, var(--color-warn) 40%, var(--color-line));
-		border-radius: 999px;
-		padding: 2px 9px;
 	}
 </style>

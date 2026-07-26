@@ -161,33 +161,15 @@ export function squareIndex(name: string): number {
 	return (Number(name[1]) - 1) * 8 + FILES.indexOf(name[0]);
 }
 
-/** Ranks 8 down to 1, so white sits at the bottom the way the players see it. */
-export const DISPLAY_ORDER: number[] = Array.from({ length: 64 }, (_, i) => {
-	const row = Math.floor(i / 8);
-	const col = i % 8;
-	return (7 - row) * 8 + col;
-});
-
 // ── Pieces ─────────────────────────────────────────────────────────────────
-// Unicode glyphs, zero assets — which matters on a static Cloudflare deploy.
+// Pieces render as SVGs from `static/pieces/`. Unicode glyphs were the obvious
+// zero-asset choice and they do not survive contact with a dark board seen from
+// across a room: the solid black forms vanish into the square and the outline
+// white forms lose their silhouette. Twelve small SVGs cost 52 KB.
 
-const GLYPHS: Record<string, string> = {
-	K: '♔',
-	Q: '♕',
-	R: '♖',
-	B: '♗',
-	N: '♘',
-	P: '♙',
-	k: '♚',
-	q: '♛',
-	r: '♜',
-	b: '♝',
-	n: '♞',
-	p: '♟'
-};
+const PIECE_LETTERS = 'KQRBNPkqrbnp';
 
 export interface Piece {
-	glyph: string;
 	white: boolean;
 	letter: string;
 }
@@ -205,10 +187,8 @@ export function boardFromFen(fen: string): (Piece | null)[] {
 		} else if (char >= '1' && char <= '8') {
 			file += Number(char);
 		} else {
-			const glyph = GLYPHS[char];
-			if (glyph && rank >= 0 && file < 8) {
+			if (PIECE_LETTERS.includes(char) && rank >= 0 && file < 8) {
 				squares[rank * 8 + file] = {
-					glyph,
 					white: char === char.toUpperCase(),
 					letter: char
 				};

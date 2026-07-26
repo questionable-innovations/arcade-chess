@@ -76,7 +76,7 @@
 		color: var(--color-fg-dim);
 		background: var(--color-surface-2);
 		border: 1px solid var(--color-line);
-		border-radius: 8px;
+		border-radius: 6px;
 		cursor: pointer;
 		transition:
 			color 0.15s ease,

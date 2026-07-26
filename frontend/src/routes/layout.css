@@ -75,7 +75,11 @@ body::before {
 
 /* ── Instrument chrome ───────────────────────────────────────────────────────
    The debug rail is three sibling cards; the shell and the chip control they
-   share live here so each card component only describes what is its own. */
+   share live here so each card component only describes what is its own.
+
+   Controls are square-cornered and quiet. Capsules read as badges, and a badge
+   that can be pressed — or a label that can't but looks like it can — is the
+   one thing an operator panel cannot afford. */
 .card {
 	background: color-mix(in srgb, var(--color-surface) 82%, transparent);
 	border: 1px solid var(--color-line);
@@ -101,15 +105,15 @@ body::before {
 	margin: 0;
 }
 .chip {
-	height: 22px;
-	padding: 0 10px;
+	height: 23px;
+	padding: 0 9px;
 	font-family: var(--font-mono);
-	font-size: 10px;
+	font-size: 10.5px;
 	letter-spacing: 0.04em;
-	color: var(--color-fg-faint);
+	color: var(--color-fg-dim);
 	background: var(--color-surface-2);
 	border: 1px solid var(--color-line);
-	border-radius: 999px;
+	border-radius: 5px;
 	cursor: pointer;
 	transition:
 		color 0.15s ease,
@@ -137,6 +141,25 @@ body::before {
 	color: var(--color-fault);
 	border-color: color-mix(in srgb, var(--color-fault) 45%, var(--color-line));
 }
+
+/* Read-only state that sits where a control would. Text only, so nothing here
+   invites a press. */
+.stat {
+	font-family: var(--font-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.04em;
+	color: var(--color-fg-faint);
+}
+.stat.ok {
+	color: var(--color-live);
+}
+.stat.bad {
+	color: var(--color-fault);
+}
+.stat.warn {
+	color: var(--color-warn);
+}
+
 .note {
 	margin: 9px 0 0;
 	font-size: 10.5px;

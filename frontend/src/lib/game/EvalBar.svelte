@@ -26,7 +26,7 @@
 	<div class="head">
 		<span class="num tnum" class:pending={game.eval.status !== 'ok'}>{label}</span>
 		<span
-			class="badge"
+			class="source"
 			class:manual={game.eval.source === 'admin'}
 			class:soft={game.eval.source === 'material'}
 		>
@@ -71,23 +71,18 @@
 	.num.pending {
 		color: var(--color-fg-faint);
 	}
-	.badge {
+	.source {
 		font-family: var(--font-mono);
 		font-size: 10px;
-		letter-spacing: 0.06em;
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--color-live);
-		border: 1px solid color-mix(in srgb, var(--color-live) 40%, var(--color-line));
-		border-radius: 999px;
-		padding: 2px 8px;
 	}
-	.badge.soft {
+	.source.soft {
 		color: var(--color-warn);
-		border-color: color-mix(in srgb, var(--color-warn) 45%, var(--color-line));
 	}
-	.badge.manual {
+	.source.manual {
 		color: var(--color-probe);
-		border-color: color-mix(in srgb, var(--color-probe) 45%, var(--color-line));
 	}
 
 	.bar {

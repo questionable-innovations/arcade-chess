@@ -66,7 +66,7 @@
 			<section class="card">
 				<div class="cardhead">
 					<h3>Game</h3>
-					<span class="chip">{game.phase}</span>
+					<span class="stat">{game.phase}</span>
 				</div>
 				<div class="row">
 					<button class="chip" onclick={() => send('new_game')}>new game</button>
@@ -98,8 +98,8 @@
 			<section class="card">
 				<div class="cardhead">
 					<h3>Detection</h3>
-					<span class="chip" class:bad={!game.detect.sensors_live}>
-						{game.detect.sensors_live ? 'live' : 'no sensors'}
+					<span class="stat" class:bad={!game.detect.sensors_live}>
+						{game.detect.sensors_live ? 'sensors live' : 'no sensors'}
 					</span>
 				</div>
 				<div class="row">
@@ -190,7 +190,7 @@
 			<section class="card">
 				<div class="cardhead">
 					<h3>Board</h3>
-					<span class="chip">{game.device_id ?? 'unbound'}</span>
+					<span class="stat">{game.device_id ?? 'unbound'}</span>
 				</div>
 				<div class="row">
 					{#each deviceIds as id (id)}

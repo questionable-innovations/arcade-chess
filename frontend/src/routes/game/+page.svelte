@@ -1,6 +1,6 @@
 <script lang="ts">
 	// Arcade puzzle mode. `/` is untouched: it stays one tab away as the raw
-	// lighting / snapshot / calibration / bus-trace recovery tool, which is
+	// lighting / snapshot / calibration / bus-trace diagnostics tool, which is
 	// exactly what you want reachable when the electronics act up mid-demo.
 	//
 	// Two simultaneous consumers: the projector (unauthenticated, readable
@@ -54,7 +54,7 @@
 
 <div class="page">
 	<header class="top">
-		<a class="back" href={resolve('/')}>← bring-up</a>
+		<a class="back" href={resolve('/')}>← diagnostics</a>
 		<TurnBanner {game} />
 		<span class="link" class:live={ws.connected}>{ws.connected ? 'connected' : 'offline'}</span>
 	</header>
