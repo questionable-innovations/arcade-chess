@@ -185,11 +185,18 @@
 {/if}
 
 <style>
+	/* A column, not `grid-template-rows: auto 1fr` — the link-down banner is a
+	   conditional third child, and with a fixed two-row template it landed in
+	   the `1fr` row and swallowed the page's leftover height. Worst exactly
+	   where it matters most: the projector hides the rail, so there is more
+	   slack there than anywhere, and the one warning the room must read became
+	   a 300px empty amber block. Here the stage takes the slack whether the
+	   banner is present or not. */
 	.page {
 		min-height: 100vh;
 		min-height: 100dvh;
-		display: grid;
-		grid-template-rows: auto 1fr;
+		display: flex;
+		flex-direction: column;
 		position: relative;
 		z-index: 1;
 	}
@@ -255,20 +262,56 @@
 	.page.projector .linkdown {
 		font-size: clamp(18px, 2.4vw, 30px);
 	}
+	/* A capsule the width of its own sentence, not a slab the width of the page —
+	   the same badge language the board already uses for STALE. A live pulse does
+	   the shouting, so the fill does not have to. */
 	.linkdown {
-		/* Inset to the same gutter as the header, safe area included, so a notch
-		   never clips the one line that says the board is lying. */
-		margin: 0 calc(clamp(14px, 3vw, 32px) + var(--safe-r)) 10px
-			calc(clamp(14px, 3vw, 32px) + var(--safe-l));
-		padding: 8px 14px;
-		border-radius: 8px;
-		border: 1px solid color-mix(in srgb, var(--color-warn) 55%, transparent);
-		background: color-mix(in srgb, var(--color-warn) 14%, transparent);
+		align-self: center;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.7em;
+		/* Never wider than the header's gutter allows, notch included. */
+		max-width: calc(100% - 2 * (clamp(14px, 3vw, 32px) + var(--safe-l)));
+		margin: 2px 0 10px;
+		padding: 0.34em 0.9em;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--color-warn) 42%, transparent);
+		background: color-mix(in srgb, var(--color-warn) 9%, transparent);
 		color: var(--color-warn);
 		font-family: var(--font-mono);
-		font-size: clamp(13px, 1.6vw, 17px);
+		font-size: clamp(12px, 1.3vw, 15px);
 		letter-spacing: 0.02em;
 		text-align: center;
+	}
+	.linkdown::before {
+		content: '';
+		flex: none;
+		width: 0.5em;
+		height: 0.5em;
+		border-radius: 50%;
+		background: var(--color-warn);
+		animation: linkpulse 1.4s ease-in-out infinite;
+	}
+	@keyframes linkpulse {
+		50% {
+			opacity: 0.2;
+		}
+	}
+	/* Narrow enough that the sentence wraps, and a stadium round two lines tall
+	   reads as a speech bubble. Square it up and pin the dot to the first line. */
+	@media (max-width: 460px) {
+		.linkdown {
+			align-items: flex-start;
+			border-radius: 12px;
+		}
+		.linkdown::before {
+			margin-top: 0.42em;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.linkdown::before {
+			animation: none;
+		}
 	}
 	@media (hover: hover) {
 		.back:hover {
@@ -286,6 +329,8 @@
 	}
 
 	.stage {
+		/* Grow into the page's leftover height, never shrink below content. */
+		flex: 1 0 auto;
 		display: grid;
 		grid-template-columns: 300px minmax(0, 1fr) auto;
 		gap: clamp(14px, 2.5vw, 32px);
@@ -432,8 +477,7 @@
 			padding-bottom: 0;
 		}
 		.linkdown {
-			margin-bottom: 6px;
-			padding: 4px 12px;
+			margin: 0 0 6px;
 			font-size: 12px;
 		}
 		.stage {

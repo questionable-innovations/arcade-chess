@@ -300,6 +300,7 @@ class Rehearsal:
                 json.dumps(self.state["detect"]),
             )
             await self.act_zero(solo_game)
+            await self.act_engine(solo_game)
             solo.cancel()
 
         async with (
@@ -401,6 +402,55 @@ class Rehearsal:
             "and the whole game is playable by clicking, start to finish",
             f"phase={self.state.get('phase')} ply={self.state.get('ply')}",
         )
+        await game("abort")
+
+    # ── The engine, if there is one ───────────────────────────────────────
+
+    async def act_engine(self, game) -> None:
+        """UCI reports side-to-move POV and the server stores white POV. The
+        classic sign bug is invisible with white to move and invisible on a
+        level board, so every case here is lopsided *and* mostly black to move.
+
+        Skipped, loudly, when no engine is running: a material fallback has no
+        sign convention to get wrong, and pretending to have checked would be
+        worse than saying nothing."""
+        print("\n── the engine ──")
+        await game("new_game")
+        for _ in range(30):
+            await asyncio.sleep(0.2)
+            if self.state["eval"]["status"] == "ok":
+                break
+        if self.state["eval"]["source"] != "stockfish":
+            print("[ skip ] no engine — eval is the labelled material fallback")
+            await game("abort")
+            return
+        self.check(True, "the engine answers, and the eval is labelled `stockfish`")
+
+        # Every position here is legal. An illegal one is rejected by set_fen,
+        # and the probe would then silently re-measure the previous board.
+        cases = [
+            ("6k1/8/8/8/8/8/8/R5QK b - - 0 1", "white", "black to move, white mates"),
+            ("4k3/6Q1/8/8/8/8/8/4K3 b - - 0 1", "white", "black to move, white a queen up"),
+            ("4k3/8/8/8/8/8/6q1/4K3 b - - 0 1", "black", "black to move, black a queen up"),
+            ("4k3/8/8/8/8/8/6q1/4K3 w - - 0 1", "black", "white to move, black a queen up"),
+        ]
+        for fen, ahead, what in cases:
+            await game("set_fen", fen=fen)
+            if self.state["fen"].split()[0] != fen.split()[0]:
+                self.check(False, f"scores {what}", f"set_fen rejected {fen}")
+                continue
+            for _ in range(40):
+                await asyncio.sleep(0.2)
+                if self.state["eval"]["status"] == "ok" and self.state["eval"]["source"] == "stockfish":
+                    break
+            ev = self.state["eval"]
+            mate = ev["mate"] or 0
+            if ahead == "white":
+                ok = (ev["cp"] > 300 or mate > 0) and ev["win_prob"] > 0.5
+            else:
+                ok = (ev["cp"] < -300 or mate < 0) and ev["win_prob"] < 0.5
+            self.check(ok, f"scores {what} from white's point of view",
+                       f"cp={ev['cp']} mate={ev['mate']} win_prob={ev['win_prob']}")
         await game("abort")
 
     # ── Act one: the happy path, entirely off the sensors ─────────────────
