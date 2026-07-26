@@ -34,7 +34,7 @@ void hexEncode(const uint8_t* data, uint8_t length, char* output) {
 }
 }
 
-void NetworkManager::begin(AppConfig& config, BusManager& bus) {
+void ArcadeNetwork::begin(AppConfig& config, BusManager& bus) {
   config_ = &config;
   bus_ = &bus;
   boot_id_ = esp_random();
@@ -48,7 +48,7 @@ void NetworkManager::begin(AppConfig& config, BusManager& bus) {
   Serial.printf("[%10lu][I][NET] connecting SSID=%s\n", millis(), config.wifi_ssid.c_str());
 }
 
-void NetworkManager::connectWebSocket() {
+void ArcadeNetwork::connectWebSocket() {
   if (websocket_started_ || WiFi.status() != WL_CONNECTED) return;
   websocket_.beginSSL(config_->websocket_host.c_str(), config_->websocket_port,
                       config_->websocket_path.c_str());
@@ -68,7 +68,7 @@ void NetworkManager::connectWebSocket() {
                 config_->websocket_path.c_str());
 }
 
-void NetworkManager::tick(uint32_t now_ms) {
+void ArcadeNetwork::tick(uint32_t now_ms) {
   if (!websocket_started_ && WiFi.status() == WL_CONNECTED) {
     Serial.printf("[%10u][I][NET] Wi-Fi connected ip=%s rssi=%d\n", now_ms,
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
@@ -123,7 +123,7 @@ void NetworkManager::tick(uint32_t now_ms) {
   }
 }
 
-void NetworkManager::onEvent(WStype_t type, uint8_t* payload, size_t length) {
+void ArcadeNetwork::onEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
       connected_ = true; ever_connected_ = true; ++reconnects_;
@@ -155,7 +155,7 @@ void NetworkManager::onEvent(WStype_t type, uint8_t* payload, size_t length) {
   }
 }
 
-void NetworkManager::sendHello() {
+void ArcadeNetwork::sendHello() {
   JsonDocument doc;
   doc["v"] = 1; doc["type"] = "hello"; doc["device_id"] = config_->device_id;
   doc["boot_id"] = String(boot_id_, HEX); doc["firmware"] = "0.1.0";
@@ -169,7 +169,7 @@ void NetworkManager::sendHello() {
   sendJson(doc);
 }
 
-JsonObject NetworkManager::beginEvent(JsonDocument& doc, const char* type,
+JsonObject ArcadeNetwork::beginEvent(JsonDocument& doc, const char* type,
                                       uint32_t at_ms) {
   doc["v"] = 1; doc["type"] = type; doc["device_id"] = config_->device_id;
   doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
@@ -177,7 +177,7 @@ JsonObject NetworkManager::beginEvent(JsonDocument& doc, const char* type,
   return doc["data"].to<JsonObject>();
 }
 
-const char* NetworkManager::stateName(arcade::SensorState state) const {
+const char* ArcadeNetwork::stateName(arcade::SensorState state) const {
   switch (state) {
     case arcade::SensorState::kEmpty: return "empty";
     case arcade::SensorState::kPositive: return "positive";
@@ -186,7 +186,7 @@ const char* NetworkManager::stateName(arcade::SensorState state) const {
   }
 }
 
-void NetworkManager::publishSensor(uint8_t square, arcade::SensorState state,
+void ArcadeNetwork::publishSensor(uint8_t square, arcade::SensorState state,
                                    uint16_t raw, uint8_t node, uint8_t local) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
@@ -198,7 +198,7 @@ void NetworkManager::publishSensor(uint8_t square, arcade::SensorState state,
   sendJson(doc);
 }
 
-void NetworkManager::publishNodeStatus(uint8_t node) {
+void ArcadeNetwork::publishNodeStatus(uint8_t node) {
   if (node >= arcade::kQuadrantCount) return;
   if (!welcomed_) { ++events_dropped_offline_; return; }
   const QuadrantState& q = bus_->node(node);
@@ -229,7 +229,7 @@ void NetworkManager::publishNodeStatus(uint8_t node) {
   sendJson(doc);
 }
 
-void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
+void ArcadeNetwork::publishRawScan(bool complete, uint32_t scan_id) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
   JsonObject data = beginEvent(doc, "sensor.raw_scan", millis());
@@ -255,7 +255,7 @@ void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
   sendJson(doc);
 }
 
-void NetworkManager::publishBusTrace(const char* direction, uint8_t node,
+void ArcadeNetwork::publishBusTrace(const char* direction, uint8_t node,
                                      uint8_t sequence, arcade::MessageType type,
                                      const char* result, const uint8_t* payload,
                                      uint8_t length, uint8_t node_error_code) {
@@ -294,7 +294,7 @@ void NetworkManager::publishBusTrace(const char* direction, uint8_t node,
   sendJson(doc);
 }
 
-void NetworkManager::publishCalibrationProgress(uint8_t node, uint8_t percent) {
+void ArcadeNetwork::publishCalibrationProgress(uint8_t node, uint8_t percent) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
   JsonObject data = beginEvent(doc, "calibration.progress", millis());
@@ -302,7 +302,7 @@ void NetworkManager::publishCalibrationProgress(uint8_t node, uint8_t percent) {
   sendJson(doc);
 }
 
-void NetworkManager::publishCalibrationResult(uint8_t node, bool ok, const char* reason) {
+void ArcadeNetwork::publishCalibrationResult(uint8_t node, bool ok, const char* reason) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
   JsonObject data = beginEvent(doc, "calibration.result", millis());
@@ -311,7 +311,7 @@ void NetworkManager::publishCalibrationResult(uint8_t node, bool ok, const char*
   sendJson(doc);
 }
 
-bool NetworkManager::logAllowed(const char* component, const char* level,
+bool ArcadeNetwork::logAllowed(const char* component, const char* level,
                                 uint32_t now_ms) {
   if (static_cast<int32_t>(now_ms - log_window_ms_) >= 1000) {
     log_window_ms_ = now_ms;
@@ -337,7 +337,7 @@ bool NetworkManager::logAllowed(const char* component, const char* level,
   return true;
 }
 
-void NetworkManager::publishLog(const char* level, const char* component,
+void ArcadeNetwork::publishLog(const char* level, const char* component,
                                 const char* message, uint8_t node) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   const uint32_t now = millis();
@@ -358,7 +358,7 @@ void NetworkManager::publishLog(const char* level, const char* component,
   sendJson(doc);
 }
 
-void NetworkManager::publishSnapshot() {
+void ArcadeNetwork::publishSnapshot() {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
   JsonObject data = beginEvent(doc, "board.snapshot", millis());
@@ -384,7 +384,7 @@ void NetworkManager::publishSnapshot() {
   sendJson(doc);
 }
 
-void NetworkManager::sendJson(JsonDocument& doc) {
+void ArcadeNetwork::sendJson(JsonDocument& doc) {
   String json;
   serializeJson(doc, json);
   if (!websocket_.sendTXT(json) && ws_send_failed_ != UINT32_MAX) ++ws_send_failed_;

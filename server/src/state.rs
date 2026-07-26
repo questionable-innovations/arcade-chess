@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::device_entry::{DeviceEntry, DeviceView};
+use crate::game::{GameHandle, GameInput};
 use crate::util::now_ms;
 
 const BROADCAST_CAP: usize = 1024;
@@ -38,6 +39,13 @@ pub struct AppState {
     pub device_token: Option<String>,
     started: Instant,
     logged_unknown_types: Mutex<HashSet<String>>,
+    /// Latest `game.state` snapshot, so `init` and `GET /api/game` answer
+    /// without a round trip through the game task — a browser refresh mid-demo
+    /// must be free.
+    game_view: Mutex<Value>,
+    /// Set once the game task is running. Held here rather than threaded
+    /// through every handler, because `client.rs` and `device.rs` both feed it.
+    game_tx: OnceLock<GameHandle>,
 }
 
 impl AppState {
@@ -53,7 +61,29 @@ impl AppState {
             device_token,
             started: Instant::now(),
             logged_unknown_types: Mutex::new(HashSet::new()),
+            game_view: Mutex::new(json!({ "phase": "idle" })),
+            game_tx: OnceLock::new(),
         }
+    }
+
+    pub fn attach_game(&self, handle: GameHandle) {
+        let _ = self.game_tx.set(handle);
+    }
+
+    /// Posts to the game task if it is running. Silently no-ops otherwise, so
+    /// nothing in the bring-up path depends on puzzle mode existing.
+    pub fn send_game(&self, input: GameInput) {
+        if let Some(handle) = self.game_tx.get() {
+            handle.send(input);
+        }
+    }
+
+    pub fn game_view(&self) -> Value {
+        self.game_view.lock().expect("game view lock").clone()
+    }
+
+    pub fn set_game_view(&self, view: Value) {
+        *self.game_view.lock().expect("game view lock") = view;
     }
 
     fn lock_devices(&self) -> MutexGuard<'_, HashMap<String, DeviceEntry>> {

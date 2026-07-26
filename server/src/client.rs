@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::game::GameInput;
 use crate::state::{command_envelope, AppState, DeviceLookup};
 use crate::util::now_ms;
 
@@ -74,10 +75,14 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
 
     let mut events = state.broadcast.subscribe();
     // Queue init ahead of any relayed event so the client sees full state first.
+    // The game snapshot rides along in `init`, so a browser refresh or a
+    // projector hiccup mid-demo costs nothing and needs no round trip through
+    // the game task.
     let init = json!({
         "type": "init",
         "devices": state.snapshot_views(),
         "server": state.server_view(),
+        "game": state.game_view(),
     });
     // Without init the client renders an empty board forever; closing at least
     // makes it reconnect.
@@ -179,6 +184,14 @@ async fn handle_inbound(
     match val.get("type").and_then(Value::as_str) {
         Some("auth") => return handle_auth(state, &val, is_admin, auth_failures, out_tx).await,
         Some("command") => handle_command(state, &val, *is_admin, out_tx),
+        // Gated exactly like `command`: the game task applies the finer-grained
+        // rule, since a couple of actions are player-facing under
+        // GAME_OPEN_CONTROLS while the rest never are.
+        Some("game") => state.send_game(GameInput::Client {
+            action: val,
+            is_admin: *is_admin,
+            reply: out_tx.clone(),
+        }),
         _ => {}
     }
     true

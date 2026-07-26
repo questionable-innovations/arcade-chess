@@ -3,7 +3,7 @@
 #include <string.h>
 
 void Console::begin(Preferences& preferences, AppConfig& config, BusManager& bus,
-                    NetworkManager& network, AvrFlasher& flasher) {
+                    ArcadeNetwork& network, AvrFlasher& flasher) {
   preferences_ = &preferences;
   config_ = &config;
   bus_ = &bus;

@@ -11,6 +11,8 @@ constexpr uint8_t kMaximumEventsPerResponse = 8;
 constexpr uint8_t kRawHeaderBytes = 3;
 constexpr uint8_t kRawSquareBytes = 6;
 constexpr uint8_t kConfigEntryBytes = 3;
+// SET_PIXELS: zone:u8 + mask:u16le, then two bytes per set bit.
+constexpr uint8_t kSetPixelsHeaderBytes = 3;
 constexpr uint16_t kAllSquaresMask = UINT16_MAX;
 static_assert(kRawSquareBytes == sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2,
               "raw square wire layout changed");
@@ -243,6 +245,28 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       arcade::putU16(response.payload, arcade::getU16(request.payload));
       response.payload_length = 2;
       break;
+    case arcade::MessageType::kSetPixels: {
+      // zone:u8, mask:u16le, popcount(mask) x rgb565:u16le
+      if (request.payload_length < kSetPixelsHeaderBytes) {
+        sendError(response, request, 1); return;
+      }
+      const uint8_t zone = request.payload[0];
+      const uint16_t mask = arcade::getU16(request.payload + 1);
+      if (!lighting_.setPixels(zone, mask, request.payload + kSetPixelsHeaderBytes,
+                               static_cast<uint8_t>(request.payload_length -
+                                                    kSetPixelsHeaderBytes))) {
+        // Code 2 is "unsupported", and zone 0 genuinely is on this part: it
+        // is what tells the server to use its one-colour square tier here.
+        sendError(response, request,
+                  zone == Lighting::kZoneSquares ? 2 : 1);
+        return;
+      }
+      lighting_.requestRender();
+      response.payload[0] = zone;
+      arcade::putU16(response.payload + 1, mask);
+      response.payload_length = kSetPixelsHeaderBytes;
+      break;
+    }
     case arcade::MessageType::kSetBrightness:
       if (!requirePayload(response, request, 1)) return;
       lighting_.setBrightness(request.payload[0]); saveSettings(settings_);

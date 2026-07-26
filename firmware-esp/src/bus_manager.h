@@ -92,6 +92,12 @@ class BusManager {
                         const char* correlation = nullptr);
   bool clearGlobalSquares(const uint8_t* squares, size_t count,
                           const char* correlation = nullptr);
+  // Per-pixel colour for one edge half-bar. Quadrants running older firmware
+  // answer error code 2, which the server reads as "no bars here" and stops
+  // asking. See docs/uart-api.md SET_PIXELS.
+  bool setPixels(uint8_t node, uint8_t zone, uint16_t mask,
+                 const uint16_t* colours_rgb565, uint8_t count,
+                 const char* correlation = nullptr);
   void setOrientation(uint8_t node, uint8_t orientation);
   void setRuntimeMode(arcade::RuntimeMode mode) { runtime_mode_ = mode; }
   uint8_t globalSquare(uint8_t node, uint8_t local) const;
@@ -123,6 +129,8 @@ class BusManager {
 
  private:
   static constexpr uint8_t kQueueCapacity = 8;
+  // A full eight-pixel SET_PIXELS bar frame is 3 + 16 = 19 bytes, so the
+  // original cap still covers the longest message on the wire.
   static constexpr uint8_t kMaximumQueuedPayload = 24;
   static constexpr uint8_t kMaximumCorrelationLength = 32;
   // Shared by the POLL_EVENTS request and the reply parser that trusts its cap.

@@ -151,6 +151,21 @@ bool BusManager::setGlobalSquares(const uint8_t* squares, size_t count, uint8_t 
   return true;
 }
 
+bool BusManager::setPixels(uint8_t node, uint8_t zone, uint16_t mask,
+                           const uint16_t* colours_rgb565, uint8_t count,
+                           const char* correlation) {
+  if (!isOnline(node)) return false;
+  const uint8_t length = static_cast<uint8_t>(3 + count * 2);
+  if (length > kMaximumQueuedPayload) return false;
+  uint8_t payload[kMaximumQueuedPayload];
+  payload[0] = zone;
+  arcade::putU16(payload + 1, mask);
+  for (uint8_t i = 0; i < count; ++i) {
+    arcade::putU16(payload + 3 + i * 2, colours_rgb565[i]);
+  }
+  return enqueue(node, arcade::MessageType::kSetPixels, payload, length, correlation);
+}
+
 bool BusManager::clearGlobalSquares(const uint8_t* squares, size_t count,
                                     const char* correlation) {
   const bool all = count == 0;

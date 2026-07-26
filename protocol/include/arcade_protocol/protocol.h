@@ -64,6 +64,10 @@ enum class MessageType : uint8_t {
   kIdentify = 0x42,
   kClearLighting = 0x43,
   kRenderWindow = 0x44,
+  // Per-pixel colour for one zone: squares, or either edge half-bar. Older
+  // quadrants answer error code 2 (unsupported), which is exactly how the
+  // server discovers per-node capability without parsing version strings.
+  kSetPixels = 0x45,
   kSetDebug = 0x50,
 
   kFwPreflight = 0x60,

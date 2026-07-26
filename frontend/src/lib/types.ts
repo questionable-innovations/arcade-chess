@@ -215,6 +215,8 @@ export interface DeviceView {
 export interface InMsg {
 	type: string;
 	devices?: DeviceView[];
+	// Puzzle-mode snapshot, embedded in `init` and broadcast as `game.state`.
+	game?: import('./game/types').GameState;
 	device_id?: string;
 	event?: Envelope;
 	// Server wall-clock stamp for a relayed event, outside the device envelope.

@@ -21,6 +21,12 @@ Firmware entry points:
 - `firmware-atmega/` and `firmware-esp/` — PlatformIO projects.
 - `protocol/` — shared allocation-free framing and host tests.
 
+Content tooling:
+
+- [`position-miner/`](position-miner/README.md) — `arcpos`, which mines
+  balanced-but-decisive endgame positions out of lichess database dumps into
+  the `.arcpos` format.
+
 Render the combined overview and protocol notes with:
 
 ```sh

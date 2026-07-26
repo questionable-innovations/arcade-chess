@@ -8,9 +8,20 @@ namespace {
 constexpr size_t kMaximumCommandBytes = 2048;
 constexpr uint16_t kDefaultIdentifyMs = 3000;
 constexpr uint16_t kRestartFlushMs = 50;
+
+// 24-bit hex to RGB565, the only colour format on the UART. The quadrants
+// unpack it back to 8-bit channels, so this is the one place the precision is
+// actually lost and it is worth naming.
+uint16_t rgb565FromHex(const char* hex) {
+  const uint32_t rgb = strtoul(hex ? hex : "000000", nullptr, 16);
+  const uint16_t red = static_cast<uint16_t>((rgb >> 19) & 0x1f);
+  const uint16_t green = static_cast<uint16_t>((rgb >> 10) & 0x3f);
+  const uint16_t blue = static_cast<uint16_t>((rgb >> 3) & 0x1f);
+  return static_cast<uint16_t>((red << 11) | (green << 5) | blue);
+}
 }
 
-void NetworkManager::sendResult(const char* id, const char* status, const char* reason,
+void ArcadeNetwork::sendResult(const char* id, const char* status, const char* reason,
                                 JsonVariantConst data) {
   if (!welcomed_) return;
   JsonDocument doc;
@@ -21,7 +32,7 @@ void NetworkManager::sendResult(const char* id, const char* status, const char* 
   sendJson(doc);
 }
 
-void NetworkManager::commandComplete(const char* id, bool ok, const char* reason,
+void ArcadeNetwork::commandComplete(const char* id, bool ok, const char* reason,
                                      uint8_t node, uint8_t node_error_code) {
   if (reason && !strcmp(reason, "node_error")) {
     JsonDocument data;
@@ -34,7 +45,7 @@ void NetworkManager::commandComplete(const char* id, bool ok, const char* reason
   sendResult(id, ok ? "applied" : (rejected ? "rejected" : "timeout"), reason);
 }
 
-void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
+void ArcadeNetwork::handleCommand(const uint8_t* payload, size_t length) {
   if (length > kMaximumCommandBytes) return;
   JsonDocument doc;
   if (deserializeJson(doc, payload, length) || doc["v"].as<int>() != 1) return;
@@ -148,6 +159,41 @@ void NetworkManager::handleCommand(const uint8_t* payload, size_t length) {
     const uint32_t colour = strtoul(args["colour"] | "000000", nullptr, 16);
     accepted = bus_->setGlobalSquares(squares, count, colour >> 16, colour >> 8, colour,
                                       args["duration_ms"] | 0, id);
+    if (!accepted) { sendResult(id, "rejected", "bus_queue_full"); return; }
+  } else if (!strcmp(name, "lighting.bar")) {
+    // One edge half-bar: {node, strip: "a"|"b", pixels: ["rrggbb" x 8]}.
+    const uint8_t node = args["node"] | arcade::kInvalidNodeAddress;
+    if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
+    const char* strip = args["strip"] | "a";
+    uint8_t zone;
+    if (!strcmp(strip, "a")) zone = 1;
+    else if (!strcmp(strip, "b")) zone = 2;
+    else { sendResult(id, "rejected", "invalid_args"); return; }
+    if (!args["pixels"].is<JsonArrayConst>()) {
+      sendResult(id, "rejected", "invalid_args"); return;
+    }
+    uint16_t pixels[8]; uint8_t count = 0;
+    for (JsonVariantConst pixel : args["pixels"].as<JsonArrayConst>()) {
+      if (count >= 8) { sendResult(id, "rejected", "invalid_args"); return; }
+      pixels[count++] = rgb565FromHex(pixel.as<const char*>());
+    }
+    const uint16_t mask = static_cast<uint16_t>((1U << count) - 1U);
+    accepted = bus_->setPixels(node, zone, mask, pixels, count, id);
+    if (!accepted) { sendResult(id, "rejected", "bus_queue_full"); return; }
+  } else if (!strcmp(name, "node.config.set")) {
+    // Reaches CONFIG_SET, which the AVR has always had and nothing could
+    // address. Setting both polarity colour keys to one value makes "a piece is
+    // here" a single colour instead of green-or-blue at random. It commits
+    // EEPROM (~240 ms), so this is not a per-frame call.
+    const uint8_t node = args["node"] | arcade::kInvalidNodeAddress;
+    if (!bus_->isOnline(node)) { sendResult(id, "rejected", "node_offline"); return; }
+    const int key = args["key"] | -1;
+    const int64_t value = args["value"] | -1;
+    if (key <= 0 || key > 0xff || value < 0 || value > 0xffff) {
+      sendResult(id, "rejected", "invalid_args"); return;
+    }
+    accepted = bus_->setConfig(node, static_cast<uint8_t>(key),
+                               static_cast<uint16_t>(value), id);
     if (!accepted) { sendResult(id, "rejected", "bus_queue_full"); return; }
   } else if (!strcmp(name, "lighting.clear")) {
     uint8_t squares[arcade::kBoardSquareCount]; size_t count = 0;

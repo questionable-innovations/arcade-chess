@@ -3,6 +3,7 @@ import { demoDevice, demoEvents } from './demo';
 import { applyEvent } from './reducer';
 import { TickLog, type BusFrame } from './ticklog.svelte';
 import { WaveRunner } from './wave.svelte';
+import { IDLE_GAME, type GameState } from './game/types';
 import {
 	emptyDevice,
 	NODE_COUNT,
@@ -34,6 +35,9 @@ class WsStore {
 	authed = $state(false);
 	devices = $state<Record<string, DeviceState>>({});
 	order = $state<string[]>([]);
+	// Puzzle mode's whole state, replaced wholesale on every `game.state`.
+	// Snapshots supersede: no incremental sync, no drift.
+	game = $state<GameState>(IDLE_GAME);
 	#log = new TickLog();
 
 	get events(): TickEntry[] {
@@ -113,6 +117,12 @@ class WsStore {
 	auth(password: string): void {
 		this.#pendingAuthPassword = password;
 		this.#send({ type: 'auth', password });
+	}
+
+	// Every puzzle-mode action goes through here. A success is acknowledged by
+	// the next `game.state`; a rejection arrives as the usual `error` envelope.
+	sendGame(action: string, extra: Record<string, unknown> = {}): boolean {
+		return this.#send({ type: 'game', action, ...extra });
 	}
 
 	// Hardware connectivity probe: light one square blue for 3s (see client-api.md).
@@ -288,6 +298,9 @@ class WsStore {
 			case 'init':
 				this.#handleInit(msg);
 				break;
+			case 'game.state':
+				this.game = msg as unknown as GameState;
+				break;
 			case 'event':
 				if (msg.device_id && msg.event)
 					this.#handleEvent(msg.device_id, msg.event, msg.recv_unix_ms);
@@ -324,6 +337,8 @@ class WsStore {
 	}
 
 	#handleInit(msg: InMsg): void {
+		// The game rides along in `init`, so a browser refresh mid-demo is free.
+		if (msg.game && typeof msg.game.phase === 'string') this.game = msg.game;
 		const devices: Record<string, DeviceState> = {};
 		const order: string[] = [];
 		const ticks: Envelope[] = [];

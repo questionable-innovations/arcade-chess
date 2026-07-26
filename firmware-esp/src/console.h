@@ -11,7 +11,7 @@
 class Console {
  public:
   void begin(Preferences& preferences, AppConfig& config, BusManager& bus,
-             NetworkManager& network, AvrFlasher& flasher);
+             ArcadeNetwork& network, AvrFlasher& flasher);
   void tick();
   void printHelp() const;
 
@@ -22,7 +22,7 @@ class Console {
   Preferences* preferences_ = nullptr;
   AppConfig* config_ = nullptr;
   BusManager* bus_ = nullptr;
-  NetworkManager* network_ = nullptr;
+  ArcadeNetwork* network_ = nullptr;
   AvrFlasher* flasher_ = nullptr;
   char line_[192]{};
   uint8_t length_ = 0;

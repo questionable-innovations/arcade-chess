@@ -157,11 +157,112 @@ fifth failed attempt on a connection closes it.
 server assigns `id` and `server_seq` and forwards it to the device. Non-admin
 connections receive `error: unauthorized`.
 
+## Puzzle mode
+
+Two message types, additive on the same `/ws`. Unknown types are already ignored
+by contract, so a client that predates them keeps working.
+
+### `game.state` (server → all clients)
+
+Full snapshot on change, coalesced to at most 10 Hz, and embedded in `init` as a
+top-level `game` field so a browser refresh mid-game is free. Full snapshots
+match the rest of this API: they supersede, so there are no incremental sync
+bugs to have.
+
+```json
+{
+  "type": "game.state",
+  "game_seq": 17,
+  "phase": "idle | setup | countdown | playing | awaiting_choice | scoring | finished",
+  "device_id": "arcade-chess-001",
+  "position": { "id": "a1b2c3", "start_fen": "8/5k2/… w - - 0 1",
+                "verified_cp": 12, "drop_cp": 340 },
+  "start_fen": "…", "fen": "current FEN", "turn": "white",
+  "ply": 3, "max_ply": 10,
+  "moves": [{ "uci": "e4d5", "san": "exd5", "by": "sensor | manual | chosen | autopilot",
+              "confidence": "certain | likely" }],
+  "legal_moves": ["d6d7", "d6e7"],
+  "setup": { "placed": 6, "needed": 8, "missing": [12, 44], "extra": [13],
+             "unknown": [55], "auto_start_in_ms": null },
+  "detect": { "mode": "auto | suggest | off", "sensors_live": true,
+              "board_synced": true, "mismatch": [], "masked": [], "rotation": 0,
+              "nudge": null, "observed": "..+.-?x…" },
+  "choice": { "kind": "capture | promotion | no_match | suggest",
+              "prompt": "Which capture was that?",
+              "options": [{ "uci": "e4d5", "san": "exd5", "confidence": "likely" }] },
+  "eval": { "cp": 34, "mate": null, "win_prob": 0.53, "status": "ok | pending",
+            "source": "stockfish | material | admin", "depth": 14, "start_cp": 12 },
+  "result": { "winner": "white | black | draw", "final_cp": 123, "start_cp": 12,
+              "swing": 111, "reason": "eval | mate | stalemate | admin" },
+  "tunables": { "settle_ms": 700, "…": 0 },
+  "lighting": { "squares": "override", "bars_supported": true, "bar_map": [],
+                "colours_neutralised": true },
+  "autopilot": null,
+  "deck": { "source": "/srv/positions.json", "count": 4821, "skipped": 3 },
+  "degraded": ["node2_offline", "engine_unavailable"]
+}
+```
+
+`detect.observed` is a 64-character string — `.` empty, `+` positive polarity,
+`-` negative, `?` mid-transition, `x` unknown — rather than a 64-entry array,
+which matters at 10 Hz to every connected client. `sensors_live` is false when no
+device is bound or its events have gone stale, so the UI says "manual mode"
+instead of pretending. `setup` appears only during `setup`/`countdown`, `choice`
+only when one is pending, `result` only in `finished`.
+
+`degraded` is a product feature, not debug output: it renders as amber chips and
+gives whoever is presenting something honest to say when a subsystem drops.
+Stable values are `no_device`, `sensors_stale`, `node<N>_offline`,
+`engine_unavailable`, `bars_unsupported`, `positions_fallback`,
+`restored_after_restart`, `detect_suggest`, `detect_off`,
+`sensor_<square>_masked` and `sensor_<square>_suspect`. Clients must render an
+unrecognised code rather than dropping it.
+
+`eval.source` is never guessed at. A material count is labelled `material`, an
+operator's decree is labelled `admin`, and only a real search is `stockfish`.
+
+### `game` (client → server)
+
+Gated exactly like `command`. Everything is admin-only by default; setting
+`GAME_OPEN_CONTROLS=1` relaxes the player-facing subset — `new_game`, `start`,
+`move`, `choose`, `undo`, `resync` — for an unauthenticated tablet at the board.
+
+```json
+{ "type": "game", "action": "new_game", "position_id": "optional", "fen": "optional" }
+{ "type": "game", "action": "start" }                    // force-start from setup
+{ "type": "game", "action": "move", "uci": "e2e4" }
+{ "type": "game", "action": "choose", "uci": "e4d5" }    // "" dismisses the prompt
+{ "type": "game", "action": "undo" }
+{ "type": "game", "action": "resync" }                   // board == game state now
+{ "type": "game", "action": "set_detect", "mode": "auto | suggest | off" }
+{ "type": "game", "action": "mask_square", "square": 27, "masked": true }
+{ "type": "game", "action": "set_tunables", "settle_ms": 700 }
+{ "type": "game", "action": "set_eval", "cp": 150 }
+{ "type": "game", "action": "set_fen", "fen": "…" }      // overwrite the position
+{ "type": "game", "action": "rescore" }
+{ "type": "game", "action": "end", "winner": "white" }
+{ "type": "game", "action": "abort" }
+{ "type": "game", "action": "bind_device", "device_id": "…" }
+{ "type": "game", "action": "set_rotation", "degrees": 180 }
+{ "type": "game", "action": "bars_map", "side": 0, "half": 1, "node": 2, "strip": "a", "reversed": true }
+{ "type": "game", "action": "bars_test", "node": 2, "strip": "a", "pixel": 3 }
+{ "type": "game", "action": "autopilot", "on": true, "interval_ms": 4000 }
+```
+
+Rejections reuse the `error` envelope (`unauthorized`, `invalid_args`); a success
+is acknowledged by the next `game.state`.
+
+Square indices are the same ones the device uses — `a1 = 0`, row-major — with no
+conversion anywhere. `set_rotation` is the one place that changes, and it applies
+to occupancy interpretation and to lighting together.
+
 ## HTTP endpoints
 
 - `GET /healthz` — `200 ok`, plain text.
 - `GET /api/state` — JSON `{ "devices": [DeviceView…] }`, the same shape as
   `init`. Useful for curl-based debugging.
+- `GET /api/game` — the latest `game.state`, for when the UI is the thing that
+  is broken.
 
 ## Server environment
 
@@ -170,6 +271,12 @@ connections receive `error: unauthorized`.
 | `ADMIN_PASSWORD` | yes | Static admin password for client `auth`. |
 | `PORT` | no | HTTP/WebSocket listen port, default `8080`. |
 | `DEVICE_TOKEN` | no | If set, device upgrades to `/board` must carry `Authorization: Bearer <token>`. |
+| `POSITIONS_PATH` | no | Puzzle deck, JSON array or JSON lines, each record needing only `fen`. Falls back to the deck compiled into the binary. |
+| `STOCKFISH_PATH` | no | Engine binary, default `/usr/games/stockfish` with a `PATH` lookup behind it. Eval falls back to a material count, labelled. |
+| `GAME_OPEN_CONTROLS` | no | `1` lets unauthenticated clients drive the player-facing game actions. |
+| `GAME_SNAPSHOT_PATH` | no | Where the game is persisted on every phase change, default `/tmp/arcade-game.json`, so a restart mid-demo is survivable. |
+| `MAX_PLY` | no | Plies per game, default `10`. |
+| `SETTLE_MS`, `AUTOSTART_STABLE_MS`, `UNKNOWN_TOLERANCE`, `TIER3_MAX_DISTANCE`, `TIER3_MARGIN`, `DRAW_BAND_CP`, `COUNTDOWN_MS` | no | Detection tunables. All are also live-editable via `set_tunables`, which is the point — none of their right values are knowable before the hardware is on the table. |
 
 ## Quadrant mapping (bring-up assumption)
 

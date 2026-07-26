@@ -251,6 +251,19 @@ fn handle_event(
         }
         return;
     };
+    // Occupancy-relevant events also go to the game task. Only these four
+    // types: a live bus trace would otherwise flood a channel that has no use
+    // for it.
+    if matches!(
+        etype.as_str(),
+        "board.snapshot" | "sensor.changed" | "node.status" | "command.result"
+    ) {
+        state.send_game(crate::game::GameInput::Device {
+            device_id: device_id.to_string(),
+            event: event.clone(),
+        });
+    }
+
     // Stamp arrival outside the envelope: the device only knows its own millis,
     // so nothing else can line an event up against a server log or a wall clock.
     state.broadcast_msg(

@@ -14,7 +14,7 @@ constexpr uint16_t kSerialStartupSettleMs = 100;
 Preferences preferences;
 AppConfig config;
 BusManager bus;
-NetworkManager network;
+ArcadeNetwork network;
 AvrFlasher flasher;
 Console console;
 

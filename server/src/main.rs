@@ -1,6 +1,7 @@
 mod client;
 mod device;
 mod device_entry;
+mod game;
 mod state;
 mod util;
 
@@ -44,6 +45,11 @@ async fn main() {
 
     let state = Arc::new(AppState::new(admin_password, device_token));
 
+    // Puzzle mode is additive: one task, one route, one hook in each of the
+    // existing handlers. Everything the bring-up console does keeps working
+    // whether or not a game is running.
+    state.attach_game(game::spawn(state.clone()));
+
     // Periodically reclaim long-disconnected device entries.
     {
         let state = state.clone();
@@ -59,6 +65,7 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/state", get(api_state))
+        .route("/api/game", get(api_game))
         .route("/board", get(device::board_ws))
         .route("/ws", get(client::client_ws))
         .layer(CorsLayer::permissive())
@@ -78,4 +85,10 @@ async fn healthz() -> &'static str {
 
 async fn api_state(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({ "devices": state.snapshot_views(), "server": state.server_view() }))
+}
+
+/// Mirrors `/api/state` for the game, so puzzle mode stays curl-debuggable when
+/// the UI is the thing that is broken.
+async fn api_game(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(state.game_view())
 }

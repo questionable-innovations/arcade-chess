@@ -7,7 +7,11 @@
 #include "app_config.h"
 #include "bus_manager.h"
 
-class NetworkManager {
+// Named `ArcadeNetwork` rather than the obvious `NetworkManager`: arduino-esp32
+// 3.x added a global `class NetworkManager` in its own Network library, which
+// every translation unit picks up through Arduino.h. Two global classes of the
+// same name is a hard build failure, and this side is the one that can move.
+class ArcadeNetwork {
  public:
   void begin(AppConfig& config, BusManager& bus);
   void tick(uint32_t now_ms);

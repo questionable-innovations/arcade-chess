@@ -168,6 +168,8 @@ Initial command names:
 | `node.identify` | `node`, optional `duration_ms` |
 | `lighting.set` | `squares`, `effect`, RGB hex `colour`, optional `duration_ms` |
 | `lighting.clear` | optional `squares` |
+| `lighting.bar` | `node`, `strip` (`"a"`/`"b"`), `pixels`: up to 8 RGB hex strings, position order along the bar. Quadrants without `SET_PIXELS` reject with `node_error` code 2 |
+| `node.config.set` | `node`, `key` (see the `ConfigKey` table in `protocol/include/arcade_protocol/protocol.h`), `value` 0-65535. Commits EEPROM (~240 ms), so not a per-frame call |
 | `calibration.start` | `node` 0-3 or `"all"`; board must be empty |
 | `sensor.raw_scan.get` | Optional `samples_per_square` from 1-32; returns one averaged `sensor.raw_scan` event |
 | `sensor.raw_stream.set` | `enabled`, `interval_ms` (clamped to 250-10000), `samples_per_square` (1-8), and optional `duration_ms` (maximum 10 minutes) |

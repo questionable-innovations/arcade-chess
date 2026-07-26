@@ -49,6 +49,7 @@ local timer that would drift out of that window.
 | `0x42` | `IDENTIFY` | `duration_ms:u16` | effective duration |
 | `0x43` | `CLEAR_LIGHTING` | optional `mask:u16`; empty means all | cleared mask |
 | `0x44` | `RENDER_WINDOW` | broadcast, empty | no response; all quadrants render concurrently and ESP keeps the bus quiet for 4 ms |
+| `0x45` | `SET_PIXELS` | `zone, mask:u16, popcount(mask) × rgb565:u16` | `zone, mask:u16` |
 | `0x50` | `SET_DEBUG` | `flags, raw_interval_ms:u16` | effective values |
 | `0x60` | `FW_PREFLIGHT` | empty | `node, high_fuse, bootloader_enabled, handoff_version, page_size:u16, flash_size:u32, app_limit:u32, marker_state, reset_cause, supply_mv:u16, last_broadcast_refusal` |
 | `0x61` | `MAINTENANCE_BEGIN` | broadcast: `target, token:u32, lease_ms:u16`; target `0xFF` means all | no response; non-target nodes suppress responses |
@@ -60,6 +61,36 @@ local timer that would drift out of that window.
 
 Responses echo the request type, with two exceptions: `GET_RAW_SCAN` is answered
 with type `0x25` `RAW_SCAN` and `CALIBRATE` with type `0x31` `CALIBRATION_RESULT`.
+
+### `SET_PIXELS` and the edge bars
+
+`SET_SQUARES` sets one colour for a whole quadrant — the AVR does
+`override_mask_ = mask` with a single RGB triple — and nothing addresses the edge
+bars at all: `render()` hard-paints both half-bars solid white whenever the bus
+is active. `SET_PIXELS` is the addition that makes the bars usable.
+
+`zone` selects what is being written: `1` is bar A (PE0), `2` is bar B (PE1).
+`mask` bits are **bar positions** 0-7, and the quadrant applies the
+`board_map::kEdgePixelForPosition` transposition, so a caller addresses positions
+along the bar and never has to know the LED9/LED8 chain order. Colours follow in
+ascending bit order. A zero mask releases the override and the half-bar returns
+to solid white. `IDENTIFY` outranks a written bar and clears it, so the writer
+has to re-assert afterwards.
+
+**`zone 0` (squares) is answered with error code 2, `unsupported.`** Per-square
+RGB was designed and then measured out: an ATmega328PB build sits at 1548 bytes
+of SRAM with 500 free above `_end`, the stack guard needs 480, and a per-square
+colour buffer plus a bar shadow buffer is 66 bytes. Writing bar colours directly
+into the FastLED strip buffers the quadrant already owns, and skipping the white
+fill for a written bar, costs **two bytes** and fits. If per-square colour is
+ever wanted, the SRAM has to come from somewhere else first.
+
+Because zone 0 answers `unsupported`, a server can discover per-quadrant
+capability by trying it once and reading the `node_error` code — no version
+parsing, and it works with mixed firmware across the four nodes.
+
+A full eight-pixel bar frame is 3 + 16 = 19 payload bytes, inside the ESP's
+existing 24-byte queued-payload cap.
 
 `GET_RAW_SCAN` is intentionally a relatively long response: 99 payload bytes.
 Noise and state use compact 8-bit fields. The ESP requests quadrants one at a time. A

@@ -44,8 +44,10 @@ void Lighting::setSquare(uint8_t square, const CRGB& value) {
 void Lighting::render(uint32_t now_ms) {
   fill_solid(primary_, bringup::kSquareStripPixels, CRGB::Black);
   fill_solid(secondary_, bringup::kSquareStripPixels, CRGB::Black);
-  fill_solid(edge_a_, bringup::kEdgeStripPixels, CRGB::White);
-  fill_solid(edge_b_, bringup::kEdgeStripPixels, CRGB::White);
+  // A written bar keeps whatever SET_PIXELS left in the strip; only an
+  // unwritten one falls back to the solid white every build has always shown.
+  if (!bar_written_[0]) fill_solid(edge_a_, bringup::kEdgeStripPixels, CRGB::White);
+  if (!bar_written_[1]) fill_solid(edge_b_, bringup::kEdgeStripPixels, CRGB::White);
   const bool identifying = static_cast<int32_t>(identify_until_ms_ - now_ms) > 0;
   for (uint8_t square = 0; square < arcade::kSquaresPerQuadrant; ++square) {
     CRGB value = CRGB::Black;
@@ -61,8 +63,13 @@ void Lighting::render(uint32_t now_ms) {
     setSquare(square, value);
   }
   if (identifying) {
+    // IDENTIFY is the "which node is this?" answer and outranks everything.
+    // It overwrites the bar in place, so a written bar has to be re-sent
+    // afterwards — the server re-asserts every second, so it heals itself.
     fill_solid(edge_a_, bringup::kEdgeStripPixels, identifyColour());
     fill_solid(edge_b_, bringup::kEdgeStripPixels, identifyColour());
+    bar_written_[0] = false;
+    bar_written_[1] = false;
   }
   // These calls mask interrupts for roughly 2.4 ms total. They run only after an
   // ESP render-window broadcast, while the shared bus is intentionally idle.
@@ -75,6 +82,10 @@ bool Lighting::busIdle(uint32_t now_ms) const {
 }
 
 void Lighting::renderIdle(uint32_t now_ms) {
+  // The idle breath owns the whole board, bars included. Forget any written
+  // bar rather than leaving one frozen in a breath colour when the ESP returns.
+  bar_written_[0] = false;
+  bar_written_[1] = false;
   const uint8_t phase = static_cast<uint8_t>(
       (now_ms % bringup::kIdleBreathMs) * 256UL / bringup::kIdleBreathMs);
   const uint8_t value = map8(sin8(phase), bringup::kIdleMinimumValue,
@@ -147,6 +158,42 @@ void Lighting::setSquares(uint16_t mask, uint8_t red, uint8_t green, uint8_t blu
   override_until_ms_ = duration_ms ? now_ms + duration_ms : 0;
 }
 
+bool Lighting::setPixels(uint8_t zone, uint16_t mask, const uint8_t* colours,
+                         uint8_t length) {
+  // Squares are deliberately not a zone here: a per-square colour buffer is
+  // 34 bytes of SRAM this part does not have (see lighting.h). Answering
+  // "unsupported" rather than silently ignoring it is what lets the server
+  // discover the capability per quadrant and drop to its one-colour tier.
+  if (zone != kZoneBarA && zone != kZoneBarB) return false;
+  // A half-bar is eight pixels, so a high mask byte can only be a caller
+  // confusing zones with squares.
+  if (mask & 0xff00U) return false;
+  uint8_t count = 0;
+  for (uint8_t bit = 0; bit < bringup::kEdgeStripPixels; ++bit) {
+    if (mask & (1U << bit)) ++count;
+  }
+  if (length != static_cast<uint8_t>(count * 2)) return false;
+
+  const uint8_t half = zone - kZoneBarA;
+  CRGB* strip = half ? edge_b_ : edge_a_;
+  if (!mask) {
+    bar_written_[half] = false;
+    return true;
+  }
+  // Fill first: a partial mask over an unwritten bar would otherwise inherit
+  // whatever the last frame happened to leave in the buffer.
+  if (!bar_written_[half]) fill_solid(strip, bringup::kEdgeStripPixels, CRGB::Black);
+  bar_written_[half] = true;
+  uint8_t offset = 0;
+  for (uint8_t position = 0; position < bringup::kEdgeStripPixels; ++position) {
+    if (!(mask & (1U << position))) continue;
+    strip[board_map::kEdgePixelForPosition[position]] =
+        rgb565(arcade::getU16(colours + offset));
+    offset += 2;
+  }
+  return true;
+}
+
 void Lighting::clear(uint16_t mask) { override_mask_ &= static_cast<uint16_t>(~mask); }
 
 void Lighting::identify(uint16_t duration_ms, uint32_t now_ms) {
@@ -160,6 +207,8 @@ void Lighting::setBrightness(uint8_t brightness) {
 
 void Lighting::shutdownNow() {
   override_mask_ = 0;
+  bar_written_[0] = false;
+  bar_written_[1] = false;
   identify_until_ms_ = 0;
   FastLED.clear(true);
 }
