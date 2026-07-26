@@ -77,6 +77,14 @@ void ProtocolService::sendError(arcade::Frame& response, const arcade::Frame& re
   sendFrame(response);
 }
 
+// Every fixed-length request rejects a mismatched payload as error 1.
+bool ProtocolService::requirePayload(arcade::Frame& response,
+                                     const arcade::Frame& request, uint8_t bytes) {
+  if (request.payload_length == bytes) return true;
+  sendError(response, request, 1);
+  return false;
+}
+
 bool ProtocolService::applyConfig(uint8_t key, uint16_t value) {
   switch (static_cast<arcade::ConfigKey>(key)) {
     case arcade::ConfigKey::kEnterThreshold:
@@ -217,7 +225,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       raw_response_pending_ = true;
       return;
     case arcade::MessageType::kCalibrate:
-      if (request.payload_length != 1) { sendError(response, request, 1); return; }
+      if (!requirePayload(response, request, 1)) return;
       if (request.payload[0] == 1) sensors_.startCalibration();
       else if (request.payload[0] == 2) sensors_.cancelCalibration();
       else { sendError(response, request, 1); return; }
@@ -228,7 +236,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = 4;
       break;
     case arcade::MessageType::kSetSquares:
-      if (request.payload_length != 7) { sendError(response, request, 1); return; }
+      if (!requirePayload(response, request, 7)) return;
       lighting_.setSquares(arcade::getU16(request.payload), request.payload[2],
           request.payload[3], request.payload[4],
           arcade::getU16(request.payload + 5), millis());
@@ -236,12 +244,12 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = 2;
       break;
     case arcade::MessageType::kSetBrightness:
-      if (request.payload_length != 1) { sendError(response, request, 1); return; }
+      if (!requirePayload(response, request, 1)) return;
       lighting_.setBrightness(request.payload[0]); saveSettings(settings_);
       response.payload[0] = settings_.brightness; response.payload_length = 1;
       break;
     case arcade::MessageType::kIdentify:
-      if (request.payload_length != 2) { sendError(response, request, 1); return; }
+      if (!requirePayload(response, request, 2)) return;
       lighting_.identify(arcade::getU16(request.payload), millis());
       memcpy(response.payload, request.payload, 2); response.payload_length = 2;
       break;
@@ -280,7 +288,7 @@ void ProtocolService::handleRequest(const arcade::Frame& request) {
       response.payload_length = request.payload_length;
       break;
     case arcade::MessageType::kSetDebug:
-      if (request.payload_length != 3) { sendError(response, request, 1); return; }
+      if (!requirePayload(response, request, 3)) return;
       debug_flags_ = request.payload[0];
       debug_raw_interval_ms_ = arcade::getU16(request.payload + 1);
       response.payload[0] = debug_flags_;

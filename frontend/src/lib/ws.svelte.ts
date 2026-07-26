@@ -1,25 +1,21 @@
+import { forgetPassword, rememberedPassword, rememberPassword, resolveUrl } from './backend';
+import { demoDevice, demoEvents } from './demo';
+import { applyEvent } from './reducer';
+import { TickLog, type BusFrame } from './ticklog.svelte';
+import { WaveRunner } from './wave.svelte';
 import {
 	emptyDevice,
-	summarize,
+	NODE_COUNT,
+	SERVER_ERRORS,
 	type DeviceState,
 	type Envelope,
-	type EventData,
-	type InMsg
+	type InMsg,
+	type TickEntry
 } from './types';
-
-interface TickEntry {
-	id: number;
-	at: string;
-	text: string;
-	level: 'info' | 'warn' | 'error' | 'event';
-}
 
 const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 15000;
 const STABLE_MS = 5000;
-const LOG_MAX = 250;
-const BUS_LOG_MAX = 400;
-const AUTH_PASSWORD_KEY_PREFIX = 'arcade-chess.admin-password:';
 // A half-open socket never fires onclose, so nothing but inbound traffic proves
 // the link. Browsers answer the server's 15 s ping transparently and a pong never
 // reaches onmessage, so only real frames count. The server drops a silent device
@@ -28,135 +24,9 @@ const AUTH_PASSWORD_KEY_PREFIX = 'arcade-chess.admin-password:';
 const LIVENESS_CHECK_MS = 10000;
 const LIVENESS_TIMEOUT_MS = 60000;
 
-// Board-map sweep. One pass per axis, because a single sweep only proves one of
-// them: the file pass pins each square's column, the rank pass pins its row.
-// A square that lights out of step is mismapped, not miscalibrated.
-const WAVE_FILE_FRAMES = 8;
-const WAVE_FRAMES = WAVE_FILE_FRAMES + 8;
-const WAVE_STEP_MS = 140;
-// Longer than a step so a late frame leaves no gap, and short enough that the
-// sweep self-clears on the nodes if the socket dies mid-run.
-const WAVE_HOLD_MS = 260;
-const WAVE_FILE_COLOUR = '00a0ff';
-const WAVE_RANK_COLOUR = 'ffa000';
-
-const SERVER_ERRORS: Record<string, { text: string; level: TickEntry['level'] }> = {
-	shed_slow_client: { text: 'dropped by server: this client could not keep up', level: 'error' },
-	shed_lagged: { text: 'dropped by server: fell behind the event stream', level: 'error' },
-	unknown_event_type: { text: 'server rejected an unknown event type', level: 'warn' }
-};
-
-// Classify an envelope for log colour-coding in the debug console.
-function levelOf(env: Envelope): TickEntry['level'] {
-	if (env.type === 'diagnostic.log') {
-		const l = (env.data?.level ?? '').toLowerCase();
-		if (l === 'error' || l === 'fatal') return 'error';
-		if (l === 'warn' || l === 'warning') return 'warn';
-	}
-	if (env.type === 'command.result' && env.status && env.status !== 'applied') return 'warn';
-	if (env.type === 'calibration.result' && env.data?.ok === false) return 'error';
-	return 'event';
-}
-
-function resolveUrl(): string {
-	const override = new URLSearchParams(location.search).get('backend');
-	if (override) return override;
-	const h = location.hostname;
-	if (h === 'localhost' || h === '127.0.0.1') return 'ws://localhost:8080/ws';
-	return 'wss://chess-be.qinnovate.nz/ws';
-}
-
 // Older firmware omits the flag entirely; null means "not reported", not "off".
 function boolOrNull(v: boolean | undefined): boolean | null {
 	return typeof v === 'boolean' ? v : null;
-}
-
-function rebuildSquares(dev: DeviceState, d: EventData): void {
-	const sq = d.squares ?? [];
-	const valid = d.valid ?? [];
-	for (let i = 0; i < 64; i++) {
-		const v = sq[i];
-		dev.squares[i] = v === 1 ? 'positive' : v === -1 ? 'negative' : 'empty';
-		dev.valid[i] = valid.length ? !!valid[i] : true;
-	}
-}
-
-function rebuildNodes(dev: DeviceState, env: Envelope, d: EventData): void {
-	for (const summary of d.nodes ?? []) {
-		if (!Number.isInteger(summary.node) || summary.node < 0 || summary.node >= 4) continue;
-		dev.node_status[summary.node] = {
-			v: env.v,
-			type: 'node.status',
-			device_id: env.device_id,
-			boot_id: env.boot_id,
-			seq: env.seq,
-			at_ms: env.at_ms,
-			data: { ...summary }
-		};
-	}
-}
-
-// Rebuild device state from one relayed event, honouring (boot_id, seq) continuity:
-// snapshots supersede everything; a seq gap freezes sensor.changed until the next snapshot.
-function applyEvent(dev: DeviceState, env: Envelope): void {
-	const d = env.data ?? {};
-	if (env.type === 'node.status' && typeof d.node === 'number' && d.node >= 0 && d.node < 4) {
-		dev.node_status[d.node] = env;
-	} else if (env.type === 'device.status') {
-		dev.device_status = env;
-	} else if (env.type === 'sensor.raw_scan') {
-		dev.raw_scan = env;
-	} else if (env.type === 'calibration.progress' && typeof d.node === 'number') {
-		if (d.node >= 0 && d.node < 4) {
-			dev.calibration[d.node] = { active: true, percent: d.percent ?? 0 };
-		}
-	} else if (env.type === 'calibration.result' && typeof d.node === 'number') {
-		if (d.node >= 0 && d.node < 4) {
-			dev.calibration[d.node] = {
-				active: false,
-				percent: 100,
-				ok: !!d.ok,
-				reason: d.reason
-			};
-		}
-	}
-
-	// Seqless envelopes (e.g. command.result) carry no boot_id/seq; they update the
-	// side-effects above but must never touch boot/seq/gap continuity tracking.
-	if (typeof env.seq !== 'number') return;
-
-	const boot = env.boot_id ?? null;
-	const seq = env.seq;
-
-	if (env.type === 'board.snapshot') {
-		if (boot !== dev.bootId || seq >= dev.seq) {
-			dev.snapshot = env;
-			rebuildSquares(dev, d);
-			rebuildNodes(dev, env, d);
-			dev.bootId = boot;
-			dev.seq = seq;
-			dev.gap = false;
-		}
-		return;
-	}
-
-	if (boot !== dev.bootId) {
-		dev.bootId = boot;
-		dev.seq = seq;
-		dev.gap = true;
-		return;
-	}
-
-	if (seq > dev.seq) {
-		const contiguous = seq === dev.seq + 1;
-		dev.seq = seq;
-		if (!contiguous) dev.gap = true;
-		if (env.type === 'sensor.changed' && contiguous && !dev.gap) {
-			if (typeof d.square === 'number' && d.square >= 0 && d.square < 64 && d.state) {
-				dev.squares[d.square] = d.state;
-			}
-		}
-	}
 }
 
 class WsStore {
@@ -164,12 +34,15 @@ class WsStore {
 	authed = $state(false);
 	devices = $state<Record<string, DeviceState>>({});
 	order = $state<string[]>([]);
-	events = $state<TickEntry[]>([]);
-	// Raw UART frame trace (diagnostic.bus), kept out of the main ticker so a
-	// 40 Hz trace doesn't drown semantic events. Client-side id: uart/device seqs
-	// reset on reboot, so they can't key the list.
-	busFrames = $state<{ id: number; env: Envelope }[]>([]);
-	#busId = 0;
+	#log = new TickLog();
+
+	get events(): TickEntry[] {
+		return this.#log.entries;
+	}
+
+	get busFrames(): BusFrame[] {
+		return this.#log.busFrames;
+	}
 
 	// What we asked for vs what the device last reported (device.status). A toggle
 	// clears the report so the button answers instantly, then the device's own
@@ -178,17 +51,17 @@ class WsStore {
 	#traceWanted = $state(false);
 	#streamReported = $state<boolean | null>(null);
 	#traceReported = $state<boolean | null>(null);
-	// Purely local: the sweep is a client-driven sequence, so there is no device
-	// report to reconcile against.
-	#waving = $state(false);
-	#waveTimer: ReturnType<typeof setTimeout> | null = null;
+	#wave = new WaveRunner({
+		send: (obj) => this.#send(obj),
+		notify: (text, level) => this.#pushInfo(text, level)
+	});
 
 	get streaming(): boolean {
 		return this.#streamReported ?? this.#streamWanted;
 	}
 
 	get waving(): boolean {
-		return this.#waving;
+		return this.#wave.active;
 	}
 
 	get tracing(): boolean {
@@ -202,7 +75,6 @@ class WsStore {
 	#liveTimer: ReturnType<typeof setInterval> | null = null;
 	#lastMsgAt = 0;
 	#started = false;
-	#tickId = 0;
 	#pendingAuthPassword: string | null = null;
 
 	connect(): void {
@@ -219,22 +91,12 @@ class WsStore {
 	// Release every timer and the socket; connect() may be called again after.
 	teardown(): void {
 		this.#started = false;
-		this.#waving = false;
-		if (this.#waveTimer) {
-			clearTimeout(this.#waveTimer);
-			this.#waveTimer = null;
-		}
-		if (this.#stableTimer) {
-			clearTimeout(this.#stableTimer);
-			this.#stableTimer = null;
-		}
+		this.#stopLocalActivity();
+		// Only a deliberate teardown cancels a pending reconnect; a dropped link
+		// leaves it running so the client comes back on its own.
 		if (this.#reconnectTimer) {
 			clearTimeout(this.#reconnectTimer);
 			this.#reconnectTimer = null;
-		}
-		if (this.#liveTimer) {
-			clearInterval(this.#liveTimer);
-			this.#liveTimer = null;
 		}
 		const socket = this.#socket;
 		this.#socket = null;
@@ -294,58 +156,15 @@ class WsStore {
 		if (!sent) return;
 		this.#traceWanted = enabled;
 		this.#traceReported = null;
-		if (enabled) this.busFrames = [];
+		if (enabled) this.#log.clearBus();
 	}
 
-	// Sweep a lit file left to right, then a lit rank bottom to top, to prove the
-	// board map end to end: global square -> node -> local square -> LED chain.
-	// Calling it again while running stops it.
 	wave(deviceId: string): void {
-		if (this.#waving) return this.stopWave(deviceId);
-		this.#waving = true;
-		let frame = 0;
-		const step = () => {
-			this.#waveTimer = null;
-			if (!this.#waving) return;
-			if (frame >= WAVE_FRAMES) return this.stopWave(deviceId);
-			// Board indices are row * 8 + col, row 0 = rank 1, col 0 = file a.
-			const files = frame < WAVE_FILE_FRAMES;
-			const line = files ? frame : frame - WAVE_FILE_FRAMES;
-			const squares: number[] = [];
-			for (let n = 0; n < 8; n++) squares.push(files ? n * 8 + line : line * 8 + n);
-			const sent = this.#send({
-				type: 'command',
-				device_id: deviceId,
-				name: 'lighting.set',
-				args: {
-					squares,
-					effect: 'solid',
-					colour: files ? WAVE_FILE_COLOUR : WAVE_RANK_COLOUR,
-					duration_ms: WAVE_HOLD_MS
-				}
-			});
-			// A dead socket would otherwise leave the timer spinning against nothing.
-			if (!sent) {
-				this.#waving = false;
-				this.#pushInfo('wave stopped — link is down', 'warn');
-				return;
-			}
-			frame++;
-			this.#waveTimer = setTimeout(step, WAVE_STEP_MS);
-		};
-		step();
+		this.#wave.start(deviceId);
 	}
 
-	// Safe to call unconditionally; the explicit clear covers a stop mid-sweep,
-	// where the last few lines still hold their override.
 	stopWave(deviceId: string): void {
-		if (this.#waveTimer) {
-			clearTimeout(this.#waveTimer);
-			this.#waveTimer = null;
-		}
-		if (!this.#waving) return;
-		this.#waving = false;
-		this.#send({ type: 'command', device_id: deviceId, name: 'lighting.clear', args: {} });
+		this.#wave.stop(deviceId);
 	}
 
 	// Toggle continuous raw voltage streaming for the live debug readout.
@@ -375,7 +194,7 @@ class WsStore {
 			this.authed = false;
 			this.#lastMsgAt = Date.now();
 			this.#startWatchdog();
-			const password = this.#pendingAuthPassword ?? this.#rememberedPassword();
+			const password = this.#pendingAuthPassword ?? rememberedPassword();
 			if (password) {
 				this.#pendingAuthPassword = password;
 				this.#send({ type: 'auth', password });
@@ -398,24 +217,24 @@ class WsStore {
 			this.#traceWanted = false;
 			this.#streamReported = null;
 			this.#traceReported = null;
-			// The sweep is driven from here, so a dropped link strands it. Nodes
-			// expire their own override within WAVE_HOLD_MS, so no clear is needed.
-			this.#waving = false;
-			if (this.#waveTimer) {
-				clearTimeout(this.#waveTimer);
-				this.#waveTimer = null;
-			}
-			if (this.#stableTimer) {
-				clearTimeout(this.#stableTimer);
-				this.#stableTimer = null;
-			}
-			if (this.#liveTimer) {
-				clearInterval(this.#liveTimer);
-				this.#liveTimer = null;
-			}
+			this.#stopLocalActivity();
 			this.#scheduleReconnect();
 		};
 		socket.onerror = () => socket.close();
+	}
+
+	// Everything this client drives on its own, stopped without touching the socket
+	// or a pending reconnect.
+	#stopLocalActivity(): void {
+		this.#wave.cancel();
+		if (this.#stableTimer) {
+			clearTimeout(this.#stableTimer);
+			this.#stableTimer = null;
+		}
+		if (this.#liveTimer) {
+			clearInterval(this.#liveTimer);
+			this.#liveTimer = null;
+		}
 	}
 
 	// Force a close on a socket that has gone quiet; onclose then drives reconnect.
@@ -483,9 +302,9 @@ class WsStore {
 				this.authed = !!msg.ok;
 				if (this.#pendingAuthPassword) {
 					if (msg.ok) {
-						this.#rememberPassword(this.#pendingAuthPassword);
+						rememberPassword(this.#pendingAuthPassword);
 					} else {
-						this.#forgetPassword(this.#pendingAuthPassword);
+						forgetPassword(this.#pendingAuthPassword);
 					}
 					this.#pendingAuthPassword = null;
 				}
@@ -507,13 +326,13 @@ class WsStore {
 	#handleInit(msg: InMsg): void {
 		const devices: Record<string, DeviceState> = {};
 		const order: string[] = [];
-		const ticks: TickEntry[] = [];
-		const busReplay: { id: number; env: Envelope }[] = [];
+		const ticks: Envelope[] = [];
+		const busReplay: Envelope[] = [];
 		for (const dv of msg.devices ?? []) {
 			const dev = emptyDevice(dv.device_id);
 			dev.connected = !!dv.connected;
 			if (dv.node_status) {
-				for (let n = 0; n < 4; n++) dev.node_status[n] = dv.node_status[n] ?? null;
+				for (let n = 0; n < NODE_COUNT; n++) dev.node_status[n] = dv.node_status[n] ?? null;
 			}
 			dev.device_status = dv.device_status ?? null;
 			if (dv.snapshot) applyEvent(dev, dv.snapshot);
@@ -525,10 +344,9 @@ class WsStore {
 			for (const env of recent) applyEvent(dev, env);
 			// An active trace fills the server's recent ring with bus frames; route
 			// them to the bus tab so they don't evict every semantic console entry.
-			const semantic = recent.filter((env) => env.type !== 'diagnostic.bus');
-			for (const env of semantic.slice(-LOG_MAX)) ticks.push(this.#makeTick(env));
 			for (const env of recent) {
-				if (env.type === 'diagnostic.bus') busReplay.push({ id: this.#busId++, env });
+				if (env.type === 'diagnostic.bus') busReplay.push(env);
+				else ticks.push(env);
 			}
 			// lastEventAt stays 0 here: replayed history is not liveness, and stamping
 			// it makes a board that died an hour ago read as "live" after a reload.
@@ -541,14 +359,7 @@ class WsStore {
 		const reported = order.map((id) => devices[id].device_status?.data).find((d) => d != null);
 		this.#streamReported = boolOrNull(reported?.raw_stream);
 		this.#traceReported = boolOrNull(reported?.trace);
-		// A reconnect is exactly when the operator most needs the preceding log, so
-		// the old entries stay below a separator instead of being replaced. The
-		// stream renders newest-first, so everything under the mark is pre-drop.
-		const carried = this.events.length
-			? [this.#makeInfo('── reconnected · entries below predate the drop ──'), ...this.events]
-			: this.events;
-		this.events = [...ticks.reverse(), ...carried].slice(0, LOG_MAX);
-		this.busFrames = [...busReplay.reverse(), ...this.busFrames].slice(0, BUS_LOG_MAX);
+		this.#log.seed(ticks, busReplay, '── reconnected · entries below predate the drop ──');
 	}
 
 	#handleEvent(deviceId: string, env: Envelope, recvUnixMs?: number): void {
@@ -560,10 +371,10 @@ class WsStore {
 			this.#traceReported = boolOrNull(env.data?.trace);
 		}
 		if (env.type === 'diagnostic.bus') {
-			this.busFrames = [{ id: this.#busId++, env }, ...this.busFrames].slice(0, BUS_LOG_MAX);
+			this.#log.pushBus(env);
 			return;
 		}
-		this.events = [this.#makeTick(env), ...this.events].slice(0, LOG_MAX);
+		this.#log.push(env);
 	}
 
 	#setConnected(deviceId: string, value: boolean): void {
@@ -580,165 +391,16 @@ class WsStore {
 		return dev;
 	}
 
-	#makeTick(env: Envelope): TickEntry {
-		return {
-			id: this.#tickId++,
-			at: env.at_ms != null ? String(env.at_ms) : '·',
-			text: summarize(env),
-			level: levelOf(env)
-		};
-	}
-
-	#makeInfo(text: string, level: TickEntry['level'] = 'info'): TickEntry {
-		return { id: this.#tickId++, at: '·', text, level };
-	}
-
 	#pushInfo(text: string, level: TickEntry['level'] = 'info'): void {
-		this.events = [this.#makeInfo(text, level), ...this.events].slice(0, LOG_MAX);
+		this.#log.pushInfo(text, level);
 	}
 
-	#authPasswordKey(): string {
-		return `${AUTH_PASSWORD_KEY_PREFIX}${resolveUrl()}`;
-	}
-
-	#rememberedPassword(): string | null {
-		try {
-			return localStorage.getItem(this.#authPasswordKey());
-		} catch {
-			return null;
-		}
-	}
-
-	#rememberPassword(password: string): void {
-		try {
-			localStorage.setItem(this.#authPasswordKey(), password);
-		} catch {
-			// Authentication still works when storage is unavailable.
-		}
-	}
-
-	#forgetPassword(password: string): void {
-		try {
-			const key = this.#authPasswordKey();
-			if (localStorage.getItem(key) === password) localStorage.removeItem(key);
-		} catch {
-			// Nothing to clear when storage is unavailable.
-		}
-	}
-
-	// ── Offline demo harness ──────────────────────────────────────────────────
-	// Builds a plausible full-board state so the interface can be reviewed and
-	// screenshotted without a live device. Activated by the `?demo` query flag.
 	#loadDemo(): void {
 		this.connected = true;
-		const dev = emptyDevice('arcade-chess-001');
-		dev.connected = true;
-		dev.bootId = '7e4c18b2';
-		dev.seq = 412;
-		dev.lastEventAt = Date.now();
-
-		// Standard opening position: back two ranks each side carry pieces.
-		const pos = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-		const neg = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63];
-		for (const i of pos) dev.squares[i] = 'positive';
-		for (const i of neg) dev.squares[i] = 'negative';
-		dev.squares[27] = 'uncertain';
-		dev.valid[42] = false;
-
-		for (let n = 0; n < 4; n++) {
-			dev.node_status[n] = {
-				type: 'node.status',
-				seq: 100 + n,
-				at_ms: 60000,
-				data: {
-					node: n,
-					online: true,
-					calibrated: n !== 2,
-					firmware: '0.1.0',
-					node_uptime_ms: 4180000 + n * 1500,
-					event_depth: 0,
-					last_scan_ms: 11 + n,
-					node_rx_good: 8120 + n * 40,
-					node_rx_bad: 0,
-					node_event_overflow: 0,
-					supply_mv: 4980 - n * 15,
-					timeouts: 0,
-					reboots: 0
-				}
-			};
-		}
-		dev.device_status = {
-			type: 'device.status',
-			data: {
-				rssi: -58,
-				heap: 184320,
-				uptime: 4210000,
-				uptime_ms: 4210000,
-				uart_good: 32480,
-				uart_bad: 0,
-				uart_timeouts: 0,
-				ws_send_failed: 0,
-				events_dropped_offline: 0,
-				snapshot_repairs: 0,
-				raw_stream: false,
-				trace: false
-			}
-		};
-		// Op-amp centres each square at ~512 (2.5 V mid-rail); a piece pushes the
-		// reading ±~285 counts by polarity. Empty squares hover in the deadband.
-		dev.raw_scan = {
-			type: 'sensor.raw_scan',
-			data: {
-				scan_id: 7,
-				complete: true,
-				response_node_mask: 0b1111,
-				baseline_adc: Array.from({ length: 64 }, () => 512),
-				noise_adc: Array.from({ length: 64 }, (_, i) => 3 + ((i * 7) % 4)),
-				raw_adc: Array.from({ length: 64 }, (_, i) => {
-					// Deterministic pseudo-noise so the readout looks alive but stable.
-					const jitter = ((i * 37) % 23) - 11;
-					const s = dev.squares[i];
-					if (s === 'positive') return 512 + 285 + jitter;
-					if (s === 'negative') return 512 - 285 + jitter;
-					if (s === 'uncertain') return 512 + 58 + jitter; // near the enter threshold
-					return 512 + Math.round(jitter / 3); // empty: inside the deadband
-				})
-			}
-		};
-
-		this.devices = { 'arcade-chess-001': dev };
-		this.order = ['arcade-chess-001'];
-		this.events = [
-			{
-				type: 'device.status',
-				data: { rssi: -58, heap: 184320, uptime_ms: 4210000 },
-				at_ms: 60000
-			},
-			{ type: 'node.status', data: { node: 2, online: true, calibrated: false }, at_ms: 59120 },
-			{
-				type: 'diagnostic.log',
-				data: { level: 'warn', component: 'node2', message: 'awaiting calibration' },
-				at_ms: 58900
-			},
-			{
-				type: 'sensor.changed',
-				seq: 412,
-				data: { square: 27, state: 'uncertain', raw: 471 },
-				at_ms: 58400
-			},
-			{
-				type: 'sensor.raw_scan',
-				data: { scan_id: 7, complete: true, response_node_mask: 15 },
-				at_ms: 57800
-			},
-			{
-				type: 'sensor.changed',
-				seq: 411,
-				data: { square: 12, state: 'positive', raw: 702 },
-				at_ms: 57200
-			},
-			{ type: 'board.snapshot', seq: 410, data: { valid: dev.valid }, at_ms: 56000 }
-		].map((e) => this.#makeTick(e as Envelope));
+		const dev = demoDevice();
+		this.devices = { [dev.device_id]: dev };
+		this.order = [dev.device_id];
+		this.#log.reset(demoEvents(dev));
 	}
 }
 

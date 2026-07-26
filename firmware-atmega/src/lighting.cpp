@@ -4,6 +4,15 @@
 #include "bringup_config.h"
 
 namespace quadrant {
+namespace {
+constexpr uint16_t kFrameIntervalMs = 1000U / bringup::kLedFramesPerSecond;
+
+// One amber says "look at me" for both attention states: the addressed IDENTIFY
+// and the unprovisioned blink.
+CRGB identifyColour() {
+  return CRGB(bringup::kIdentifyRed, bringup::kIdentifyGreen, bringup::kIdentifyBlue);
+}
+}
 
 Lighting::Lighting(Settings& settings, Sensors& sensors)
     : settings_(settings), sensors_(sensors) {}
@@ -41,10 +50,7 @@ void Lighting::render(uint32_t now_ms) {
   for (uint8_t square = 0; square < arcade::kSquaresPerQuadrant; ++square) {
     CRGB value = CRGB::Black;
     if (identifying) {
-      if ((now_ms / bringup::kIdentifyBlinkMs) & 1U) {
-        value = CRGB(bringup::kIdentifyRed, bringup::kIdentifyGreen,
-                     bringup::kIdentifyBlue);
-      }
+      if ((now_ms / bringup::kIdentifyBlinkMs) & 1U) value = identifyColour();
     } else if (override_mask_ & (1U << square)) {
       value = CRGB(override_red_, override_green_, override_blue_);
     } else if (sensors_.state(square) == arcade::SensorState::kPositive) {
@@ -55,10 +61,8 @@ void Lighting::render(uint32_t now_ms) {
     setSquare(square, value);
   }
   if (identifying) {
-    const CRGB identify_colour(bringup::kIdentifyRed, bringup::kIdentifyGreen,
-                               bringup::kIdentifyBlue);
-    fill_solid(edge_a_, bringup::kEdgeStripPixels, identify_colour);
-    fill_solid(edge_b_, bringup::kEdgeStripPixels, identify_colour);
+    fill_solid(edge_a_, bringup::kEdgeStripPixels, identifyColour());
+    fill_solid(edge_b_, bringup::kEdgeStripPixels, identifyColour());
   }
   // These calls mask interrupts for roughly 2.4 ms total. They run only after an
   // ESP render-window broadcast, while the shared bus is intentionally idle.
@@ -99,9 +103,7 @@ void Lighting::renderIdle(uint32_t now_ms) {
 
 void Lighting::renderUnprovisioned(uint32_t now_ms) {
   const bool on = (now_ms / bringup::kUnprovisionedBlinkMs) & 1U;
-  const CRGB value = on ? CRGB(bringup::kIdentifyRed, bringup::kIdentifyGreen,
-                               bringup::kIdentifyBlue)
-                        : CRGB::Black;
+  const CRGB value = on ? identifyColour() : CRGB(CRGB::Black);
   fill_solid(primary_, bringup::kSquareStripPixels, value);
   fill_solid(secondary_, bringup::kSquareStripPixels, value);
   fill_solid(edge_a_, bringup::kEdgeStripPixels, value);
@@ -117,7 +119,7 @@ void Lighting::tick(uint32_t now_ms) {
   if (unprovisioned_) {
     // This node never transmits, so an unsynchronised shift-out costs nothing.
     if (static_cast<int32_t>(now_ms - next_frame_ms_) < 0) return;
-    next_frame_ms_ = now_ms + (1000U / bringup::kLedFramesPerSecond);
+    next_frame_ms_ = now_ms + kFrameIntervalMs;
     renderUnprovisioned(now_ms);
     return;
   }
@@ -126,13 +128,13 @@ void Lighting::tick(uint32_t now_ms) {
     // the interrupts-off shift-out to a local timer running at the same rate
     // would drop alternate windows and push the rest over live bus traffic.
     render_requested_ = false;
-    next_frame_ms_ = now_ms + (1000U / bringup::kLedFramesPerSecond);
+    next_frame_ms_ = now_ms + kFrameIntervalMs;
     render(now_ms);
     return;
   }
   if (!busIdle(now_ms)) return;
   if (static_cast<int32_t>(now_ms - next_frame_ms_) < 0) return;
-  next_frame_ms_ = now_ms + (1000U / bringup::kLedFramesPerSecond);
+  next_frame_ms_ = now_ms + kFrameIntervalMs;
   renderIdle(now_ms);
 }
 

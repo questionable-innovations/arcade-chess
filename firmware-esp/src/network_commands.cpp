@@ -18,7 +18,7 @@ void NetworkManager::sendResult(const char* id, const char* status, const char* 
   doc["id"] = id; doc["status"] = status;
   if (reason) doc["reason"] = reason; else doc["reason"] = nullptr;
   if (!data.isNull()) doc["data"] = data;
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 void NetworkManager::commandComplete(const char* id, bool ok, const char* reason,

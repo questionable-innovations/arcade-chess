@@ -3,6 +3,12 @@
 
 export type SquareState = 'empty' | 'positive' | 'negative' | 'uncertain';
 
+// Board geometry: four quadrant nodes, each owning a 4x4 block of the 8x8 board.
+export const NODE_COUNT = 4;
+export const SQUARE_COUNT = 64;
+// Ready-made [0..NODE_COUNT) for the components that render one row per node.
+export const NODE_INDICES = Array.from({ length: NODE_COUNT }, (_, i) => i);
+
 export interface NodeSummary {
 	node: number;
 	online: boolean;
@@ -258,13 +264,13 @@ export function emptyDevice(id: string): DeviceState {
 		bootId: null,
 		seq: -1,
 		gap: false,
-		squares: Array.from({ length: 64 }, () => 'empty' as SquareState),
-		valid: Array.from({ length: 64 }, () => true),
+		squares: Array.from({ length: SQUARE_COUNT }, () => 'empty' as SquareState),
+		valid: Array.from({ length: SQUARE_COUNT }, () => true),
 		snapshot: null,
-		node_status: [null, null, null, null],
+		node_status: Array.from({ length: NODE_COUNT }, () => null),
 		device_status: null,
 		raw_scan: null,
-		calibration: [null, null, null, null],
+		calibration: Array.from({ length: NODE_COUNT }, () => null),
 		lastEventAt: 0
 	};
 }
@@ -276,8 +282,8 @@ export function summarize(env: Envelope): string {
 		case 'sensor.changed':
 			return `sensor.changed sq${d.square} ${d.state}${d.raw != null ? ` raw=${d.raw}` : ''}`;
 		case 'board.snapshot': {
-			const n = d.valid ? d.valid.filter(Boolean).length : 64;
-			return `board.snapshot valid=${n}/64`;
+			const n = d.valid ? d.valid.filter(Boolean).length : SQUARE_COUNT;
+			return `board.snapshot valid=${n}/${SQUARE_COUNT}`;
 		}
 		case 'sensor.raw_scan':
 			return `sensor.raw_scan ${d.scan_id ?? '?'} ${d.complete ? 'complete' : 'partial'} mask=${d.response_node_mask ?? '?'}`;
@@ -312,4 +318,30 @@ export function summarize(env: Envelope): string {
 		default:
 			return env.type;
 	}
+}
+
+// One line of the debug console: summarize() supplies the text, levelOf() the colour.
+export interface TickEntry {
+	id: number;
+	at: string;
+	text: string;
+	level: 'info' | 'warn' | 'error' | 'event';
+}
+
+export const SERVER_ERRORS: Record<string, { text: string; level: TickEntry['level'] }> = {
+	shed_slow_client: { text: 'dropped by server: this client could not keep up', level: 'error' },
+	shed_lagged: { text: 'dropped by server: fell behind the event stream', level: 'error' },
+	unknown_event_type: { text: 'server rejected an unknown event type', level: 'warn' }
+};
+
+// Classify an envelope for log colour-coding in the debug console.
+export function levelOf(env: Envelope): TickEntry['level'] {
+	if (env.type === 'diagnostic.log') {
+		const l = (env.data?.level ?? '').toLowerCase();
+		if (l === 'error' || l === 'fatal') return 'error';
+		if (l === 'warn' || l === 'warning') return 'warn';
+	}
+	if (env.type === 'command.result' && env.status && env.status !== 'applied') return 'warn';
+	if (env.type === 'calibration.result' && env.data?.ok === false) return 'error';
+	return 'event';
 }

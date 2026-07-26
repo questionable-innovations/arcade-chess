@@ -1,9 +1,10 @@
 <script lang="ts">
 	import {
+		adcToVolts,
 		nodeHealth,
 		polarityColor,
 		ADC_CENTER,
-		AVCC_MV,
+		NODE_INDICES,
 		type Envelope,
 		type SquareState
 	} from './types';
@@ -72,8 +73,7 @@
 
 	// Signed deviation voltage (± around centre) — the meaningful readout here.
 	function devVolts(i: number): number | null {
-		const d = deviation(i);
-		return d == null ? null : (d * AVCC_MV) / 1023 / 1000;
+		return adcToVolts(deviation(i));
 	}
 
 	function voltLabel(i: number): string {
@@ -162,7 +162,7 @@
 			<!-- Quadrant seams + node badges surface the physical boards only here. -->
 			<div class="seam v"></div>
 			<div class="seam h"></div>
-			{#each [0, 1, 2, 3] as node (node)}
+			{#each NODE_INDICES as node (node)}
 				<span class="badge q{node} {nodeHealth(nodeStatus[node])}">
 					<span class="ring"></span>n{node}
 				</span>

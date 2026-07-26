@@ -32,15 +32,12 @@ done
 
 if [[ ! "$id" =~ ^[0-3]$ ]]; then usage; exit 2; fi
 clock="$(awk -F'"' '/^QUADRANT_CLOCK = "(internal|external)"$/ { print $2; exit }' "$root/tools/pio-targets.py")"
+# Both profiles build the same environment; pio-targets.py rewrites f_cpu and the
+# oscillator setting from QUADRANT_CLOCK at build time.
+firmware_env="ATmega328PB"
 case "$clock" in
-  internal)
-    firmware_env="ATmega328PB"
-    clock_description="internal 8 MHz RC"
-    ;;
-  external)
-    firmware_env="ATmega328PB"
-    clock_description="external 16 MHz crystal"
-    ;;
+  internal) clock_description="internal 8 MHz RC" ;;
+  external) clock_description="external 16 MHz crystal" ;;
   *) usage; exit 2 ;;
 esac
 find_pio
@@ -61,8 +58,13 @@ if ((with_bootloader)); then
 fi
 if ((!confirm)); then echo "dry run only; repeat with --yes to program"; exit 0; fi
 
-env_name="fuses_isp"
-if ((with_bootloader)); then env_name="fuses_bootloader"; fi
+if ((with_bootloader)); then
+  env_name="fuses_bootloader"
+  pio_target="bootloader"
+else
+  env_name="fuses_isp"
+  pio_target="fuses"
+fi
 # The fuse environments live in the separate provisioning/ project (kept out of
 # the IDE sidebar of the main firmware project).
 provision_dir="$root/firmware-atmega/provisioning"
@@ -95,20 +97,15 @@ awk -v protocol="$programmer" -v flags="$upload_flags" '
 ' "$provision_dir/platformio.ini" > "$provision_conf"
 pio_options=(--project-conf "$provision_conf")
 if [[ -n "$port" ]]; then pio_options+=(--upload-port "$port"); fi
-"${pio[@]}" run -d "$provision_dir" -e "$env_name" \
-  "${pio_options[@]}" -t "$([[ $with_bootloader == 1 ]] && echo bootloader || echo fuses)"
+"${pio[@]}" run -d "$provision_dir" -e "$env_name" "${pio_options[@]}" -t "$pio_target"
 
 find_avrdude
+avrdude_base_args
 firmware="$root/firmware-atmega/.pio/build/$firmware_env/firmware.hex"
-base_args=(-C "$avrdude_conf" -p m328pb -c "$programmer")
-if [[ "$programmer" == "arduino_as_isp" ]]; then
-  base_args+=(-b "$programmer_baud")
-else
-  base_args+=(-B "$bitclock")
-fi
-if [[ -n "$port" ]]; then base_args+=(-P "$port"); fi
-write_args=("${base_args[@]}")
+write_args=("${avrdude_args[@]}")
+# -D preserves the Urboot the fuse environment just installed; without it the
+# application write would chip-erase the boot section away.
 if ((with_bootloader)); then write_args+=(-D); else write_args+=(-e); fi
 "$avrdude" "${write_args[@]}" -U "flash:w:$firmware:i" -U "eeprom:w:$eeprom:r"
-"$avrdude" "${base_args[@]}" -U "flash:v:$firmware:i" -U "eeprom:v:$eeprom:r"
+"$avrdude" "${avrdude_args[@]}" -U "flash:v:$firmware:i" -U "eeprom:v:$eeprom:r"
 echo "quadrant $id programmed and verified"

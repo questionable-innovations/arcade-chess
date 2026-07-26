@@ -21,12 +21,23 @@ constexpr uint16_t kCrcPolynomial = 0x1021;
 constexpr uint16_t kCrcTopBit = 0x8000;
 constexpr uint8_t kBitsPerByte = 8;
 
+// Every stored record ends in a CRC covering the bytes ahead of it.
+template <typename Record>
+uint16_t recordCrc(const Record& record) {
+  return storageCrc(reinterpret_cast<const uint8_t*>(&record),
+                    sizeof(record) - sizeof(record.crc));
+}
+
+template <typename Record>
+bool recordCrcValid(const Record& record) {
+  return record.crc == recordCrc(record);
+}
+
 bool validUpdateMarker(const UpdateMarker& marker) {
   return marker.magic == kUpdateMagic && marker.version == kStorageVersion &&
          marker.node_id < arcade::kQuadrantCount &&
          static_cast<uint8_t>(marker.state) <= static_cast<uint8_t>(UpdateState::kValid) &&
-         marker.crc == storageCrc(reinterpret_cast<const uint8_t*>(&marker),
-                                  sizeof(marker) - sizeof(marker.crc));
+         recordCrcValid(marker);
 }
 
 bool generationNewer(uint8_t candidate, uint8_t current) {
@@ -50,9 +61,7 @@ uint16_t storageCrc(const uint8_t* bytes, size_t length) {
 bool loadIdentity(Identity& identity) {
   EEPROM.get(kIdentityEepromAddress, identity);
   return identity.magic == kIdentityMagic && identity.version == kStorageVersion &&
-         identity.node_id < arcade::kQuadrantCount &&
-         identity.crc == storageCrc(reinterpret_cast<const uint8_t*>(&identity),
-                                    sizeof(identity) - sizeof(identity.crc));
+         identity.node_id < arcade::kQuadrantCount && recordCrcValid(identity);
 }
 
 void loadDefaultSettings(Settings& s) {
@@ -85,8 +94,7 @@ bool loadSettings(Settings& settings) {
       settings.debounce_scans <= bringup::kMaximumDebounceScans &&
       static_cast<uint8_t>(settings.runtime_mode) <=
           static_cast<uint8_t>(arcade::RuntimeMode::kBringup) &&
-      settings.crc == storageCrc(reinterpret_cast<const uint8_t*>(&settings),
-                                 sizeof(settings) - sizeof(settings.crc));
+      recordCrcValid(settings);
   if (!valid) loadDefaultSettings(settings);
   return valid;
 }
@@ -94,8 +102,7 @@ bool loadSettings(Settings& settings) {
 void saveSettings(Settings& settings) {
   settings.magic = kSettingsMagic;
   settings.version = kSettingsVersion;
-  settings.crc = storageCrc(reinterpret_cast<const uint8_t*>(&settings),
-                            sizeof(settings) - sizeof(settings.crc));
+  settings.crc = recordCrc(settings);
   EEPROM.put(kSettingsEepromAddress, settings);
 }
 
@@ -119,8 +126,7 @@ void saveUpdateMarker(UpdateMarker& marker) {
   marker.magic = kUpdateMagic;
   marker.version = kStorageVersion;
   marker.generation = had_current ? static_cast<uint8_t>(current.generation + 1) : 0;
-  marker.crc = storageCrc(reinterpret_cast<const uint8_t*>(&marker),
-                          sizeof(marker) - sizeof(marker.crc));
+  marker.crc = recordCrc(marker);
   const uint16_t destination = !had_current || current.generation & 1
       ? kUpdateMarkerAEepromAddress : kUpdateMarkerBEepromAddress;
   EEPROM.put(destination, marker);

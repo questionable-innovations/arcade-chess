@@ -23,6 +23,7 @@ import pathlib
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 import serial
 from serial.tools import list_ports
@@ -31,6 +32,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_ENV = "ATmega328PB"
 QUADRANT_COUNT = 4
 USB_SERIAL_HINTS = ("usbserial", "usbmodem", "slab", "wchusb", "ttyusb", "ttyacm")
+# The ESP32 USB console, not the ESP<->quadrant bus link the flasher drives.
+ESP_CONSOLE_BAUD = 115200
+FAIL_TOKEN = "FLASH FAIL"
 
 
 def fatal(message: str) -> "NoReturn":  # noqa: F821
@@ -77,33 +81,31 @@ def read_line(port: serial.Serial, timeout_s: float) -> str:
     return ""
 
 
-def expect(port: serial.Serial, token: str, timeout_s: float) -> str:
+def read_until(port: serial.Serial, matches: Callable[[str], bool],
+               timeout_s: float, timeout_message: str) -> str:
+    """Read lines until one matches, ignoring asynchronous ESP log chatter."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         line = read_line(port, deadline - time.monotonic())
         if not line:
             continue
-        if token in line:
+        if matches(line):
             return line
-        if "FLASH FAIL" in line:
+        if FAIL_TOKEN in line:
             fatal(line)
         print(f"  esp: {line}")
-    fatal(f"timed out waiting for '{token}'")
+    fatal(timeout_message)
+
+
+def expect(port: serial.Serial, token: str, timeout_s: float) -> str:
+    return read_until(port, lambda line: token in line, timeout_s,
+                      f"timed out waiting for '{token}'")
 
 
 def await_ack(port: serial.Serial, index: int, total: int, timeout_s: float) -> None:
     """Wait for a record ack, ignoring asynchronous ESP log chatter."""
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        line = read_line(port, deadline - time.monotonic())
-        if not line:
-            continue
-        if line == "+":
-            return
-        if "FLASH FAIL" in line:
-            fatal(line)
-        print(f"  esp: {line}")
-    fatal(f"record {index + 1}/{total}: timed out waiting for ack")
+    read_until(port, lambda line: line == "+", timeout_s,
+               f"record {index + 1}/{total}: timed out waiting for ack")
 
 
 def flash_target(port: serial.Serial, command: str, label: str,
@@ -158,7 +160,7 @@ def main() -> None:
     if not lines or not all(l.startswith(":") for l in lines):
         fatal(f"{hex_path} is not an Intel HEX file")
 
-    with serial.Serial(args.port or detect_port(), 115200, timeout=0.1) as port:
+    with serial.Serial(args.port or detect_port(), ESP_CONSOLE_BAUD, timeout=0.1) as port:
         time.sleep(0.3)
         if args.simultaneous:
             flash_target(port, "fw-flash-all", "all attached quadrants",

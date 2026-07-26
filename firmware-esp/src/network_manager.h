@@ -31,15 +31,7 @@ class NetworkManager {
   uint32_t reconnects() const { return reconnects_; }
 
  private:
-  static constexpr uint8_t kCommandHistorySize = 8;
-
   static constexpr uint8_t kLogGateCount = 6;
-
-  struct CommandRecord {
-    char id[33]{};
-    char status[12]{};
-    char reason[28]{};
-  };
 
   // One repeat gate per (component, level) so a storm on one channel cannot
   // starve every other channel out of the shared per-second budget.
@@ -54,9 +46,11 @@ class NetworkManager {
   void sendHello();
   void sendResult(const char* id, const char* status, const char* reason = nullptr,
                   JsonVariantConst data = JsonVariantConst());
-  void recordResult(const char* id, const char* status, const char* reason);
-  CommandRecord* findResult(const char* id);
-  void sendJson(String& json);
+  // Writes the envelope every published event shares and returns its `data`
+  // object. Key insertion order is the wire order, so nothing may be added
+  // between the call and the fields the caller then writes into `data`.
+  JsonObject beginEvent(JsonDocument& doc, const char* type, uint32_t at_ms);
+  void sendJson(JsonDocument& doc);
   bool logAllowed(const char* component, const char* level, uint32_t now_ms);
   const char* stateName(arcade::SensorState state) const;
 
@@ -74,9 +68,7 @@ class NetworkManager {
   uint32_t events_dropped_offline_ = 0;
   uint32_t boot_id_ = 0;
   uint32_t event_sequence_ = 0;
-  uint32_t status_interval_ms_ = 15000;
   uint32_t next_status_ms_ = 0;
-  uint32_t next_snapshot_ms_ = 0;
   bool raw_stream_enabled_ = false;
   uint32_t raw_stream_interval_ms_ = 1000;
   uint32_t raw_stream_until_ms_ = 0;
@@ -93,8 +85,6 @@ class NetworkManager {
   uint32_t log_window_ms_ = 0;
   uint8_t log_window_count_ = 0;
   uint16_t log_suppressed_ = 0;
-  CommandRecord command_history_[kCommandHistorySize]{};
-  uint8_t command_history_next_ = 0;
   String extra_headers_;
   arcade::RuntimeMode runtime_mode_ = arcade::RuntimeMode::kNormal;
 };

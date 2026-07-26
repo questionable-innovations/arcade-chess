@@ -5,6 +5,21 @@
 namespace arcade {
 namespace {
 
+// CRC-16/CCITT-FALSE, as documented in protocol/README.md: no reflection and no
+// final XOR, so the seed and polynomial are the whole specification.
+constexpr uint16_t kCrcInit = 0xffff;
+constexpr uint16_t kCrcPolynomial = 0x1021;
+
+// COBS reserves the maximum code for a full 254-byte run, which is the one code
+// that does not stand in for a trailing zero byte.
+constexpr uint8_t kCobsMaxCode = 0xff;
+
+// Header layout: version, flags, source, destination, type, sequence, then the
+// little-endian payload length.
+constexpr size_t kPayloadLengthOffset = 6;
+static_assert(kPayloadLengthOffset + sizeof(uint16_t) == kHeaderSize,
+              "payload length must be the last header field");
+
 // Streaming COBS encoder. The AVR quadrants cannot afford a second full-frame
 // scratch buffer on the stack, so bytes are encoded straight into the caller's
 // output and the run's code byte is back-patched once the run closes.
@@ -24,7 +39,7 @@ class CobsWriter {
       return;
     }
     output_[write_index_++] = byte;
-    if (++code_ == 0xff) closeRun();
+    if (++code_ == kCobsMaxCode) closeRun();
   }
 
   // Returns the encoded length excluding the trailing delimiter, or zero when
@@ -58,7 +73,7 @@ class CobsWriter {
 uint16_t crc16Byte(uint16_t crc, uint8_t byte) {
   crc ^= static_cast<uint16_t>(byte) << 8;
   for (uint8_t bit = 0; bit < 8; ++bit) {
-    crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
+    crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ kCrcPolynomial)
                          : static_cast<uint16_t>(crc << 1);
   }
   return crc;
@@ -75,7 +90,9 @@ size_t cobsDecode(const uint8_t* input, size_t length, uint8_t* output,
       if (write_index >= capacity) return 0;
       output[write_index++] = input[read_index++];
     }
-    if (code != 0xff && read_index < length) {
+    // Any code below the maximum stood in for a zero byte, except for the run
+    // that closes the packet.
+    if (code != kCobsMaxCode && read_index < length) {
       if (write_index >= capacity) return 0;
       output[write_index++] = 0;
     }
@@ -86,7 +103,7 @@ size_t cobsDecode(const uint8_t* input, size_t length, uint8_t* output,
 }  // namespace
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t length) {
-  uint16_t crc = 0xffff;
+  uint16_t crc = kCrcInit;
   for (size_t i = 0; i < length; ++i) crc = crc16Byte(crc, data[i]);
   return crc;
 }
@@ -106,7 +123,7 @@ size_t encodeFrame(const Frame& frame, uint8_t* output, size_t output_capacity) 
   // One pass: header, payload and CRC are checksummed and COBS'd as they stream
   // past, so the undecoded frame is never materialised anywhere.
   CobsWriter writer(output, output_capacity - 1);
-  uint16_t crc = 0xffff;
+  uint16_t crc = kCrcInit;
   for (size_t i = 0; i < kHeaderSize; ++i) {
     crc = crc16Byte(crc, header[i]);
     writer.push(header[i]);
@@ -129,7 +146,7 @@ DecodeResult decodeFrame(const uint8_t* encoded, size_t encoded_length, Frame& o
   const size_t length = cobsDecode(encoded, encoded_length, decoded, sizeof(decoded));
   if (!length) return DecodeResult::kBadCobs;
   if (length < kHeaderSize + kCrcSize) return DecodeResult::kBadLength;
-  const uint16_t payload_length = getU16(decoded + 6);
+  const uint16_t payload_length = getU16(decoded + kPayloadLengthOffset);
   if (payload_length > kMaxPayload ||
       length != kHeaderSize + payload_length + kCrcSize) {
     return DecodeResult::kBadLength;

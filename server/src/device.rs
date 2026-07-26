@@ -6,12 +6,14 @@ use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpg
 use axum::extract::State;
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures_util::stream::SplitStream;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use crate::state::{now_ms, random_hex, AppState};
+use crate::state::{command_envelope, AppState};
+use crate::util::{now_ms, random_hex};
 
 // A full sensor.raw_scan carries four 64-entry arrays and can approach the old
 // 2 KiB ceiling once envelope metadata and longer device IDs are included.
@@ -102,7 +104,7 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
     }
     tracing::info!(device_id = %device_id, boot_id = %boot_id, "device connected");
 
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<String>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<String>();
     let session = match state.register_device(&device_id, hello, cmd_tx.clone()) {
         Some(session) => session,
         None => {
@@ -118,29 +120,7 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
     };
     state.broadcast_msg(json!({ "type": "device.connected", "device_id": device_id }).to_string());
 
-    // Writer task owns the socket sink: it drains queued commands and sends the
-    // heartbeat the welcome advertises, which also keeps NAT bindings alive.
-    let writer = tokio::spawn(async move {
-        // interval_at: `interval`'s first tick is immediate, which would ping the
-        // device before it has finished processing the welcome.
-        let period = Duration::from_millis(HEARTBEAT_MS);
-        let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-        loop {
-            tokio::select! {
-                text = cmd_rx.recv() => {
-                    let Some(text) = text else { break };
-                    if sender.send(Message::Text(text.into())).await.is_err() {
-                        break;
-                    }
-                }
-                _ = beat.tick() => {
-                    if sender.send(Message::Ping(Default::default())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let writer = spawn_writer(sender, cmd_rx);
 
     let mut warned_stale = false;
     loop {
@@ -183,6 +163,35 @@ async fn handle_board(socket: WebSocket, state: Arc<AppState>) {
         // A newer connection already owns this device_id; leave its state intact.
         tracing::info!(device_id = %device_id, "stale device connection closed; live session retained");
     }
+}
+
+/// Writer task owns the socket sink: it drains queued commands and sends the
+/// heartbeat the welcome advertises, which also keeps NAT bindings alive.
+fn spawn_writer(
+    mut sender: SplitSink<WebSocket, Message>,
+    mut cmd_rx: mpsc::UnboundedReceiver<String>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // interval_at: `interval`'s first tick is immediate, which would ping the
+        // device before it has finished processing the welcome.
+        let period = Duration::from_millis(HEARTBEAT_MS);
+        let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            tokio::select! {
+                text = cmd_rx.recv() => {
+                    let Some(text) = text else { break };
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = beat.tick() => {
+                    if sender.send(Message::Ping(Default::default())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Blocks until the mandatory first `hello` frame arrives; `None` closes.
@@ -255,15 +264,7 @@ fn handle_event(
     );
 
     if need_snapshot {
-        let n = state.next_seq();
-        let cmd = json!({
-            "v": 1,
-            "type": "command",
-            "server_seq": n,
-            "id": format!("cmd-{n}"),
-            "name": "board.snapshot.get",
-            "args": {},
-        });
+        let (_, cmd) = command_envelope(state.next_seq(), "board.snapshot.get", json!({}));
         let _ = cmd_tx.send(cmd.to_string());
         tracing::info!(
             device_id = %device_id,

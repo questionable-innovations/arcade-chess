@@ -8,7 +8,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::state::{AppState, DeviceLookup};
+use crate::state::{command_envelope, AppState, DeviceLookup};
+use crate::util::now_ms;
 
 /// Bounded per-client outbound queue. A client whose socket stalls fills this and
 /// is then shed, so one slow viewer cannot grow server memory without bound.
@@ -62,7 +63,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
                     // to the page. With no device attached the server has
                     // nothing else to say, and a silent link is exactly what
                     // this keepalive exists to distinguish from a dead one.
-                    let beat = json!({ "type": "keepalive", "unix_ms": crate::state::now_ms() });
+                    let beat = json!({ "type": "keepalive", "unix_ms": now_ms() });
                     if sink.send(Message::Text(beat.to_string().into())).await.is_err() {
                         break;
                     }
@@ -131,41 +132,8 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             },
             inbound = stream.next() => {
                 let Some(Ok(msg)) = inbound else { break };
-                match msg {
-                    Message::Text(text) => {
-                        let Ok(val) = serde_json::from_str::<Value>(text.as_str()) else {
-                            continue;
-                        };
-                        match val.get("type").and_then(Value::as_str) {
-                            Some("auth") => {
-                                let ok = constant_time_eq(
-                                    val.get("password").and_then(Value::as_str).unwrap_or("").as_bytes(),
-                                    state.admin_password.as_bytes(),
-                                );
-                                is_admin |= ok;
-                                if !ok {
-                                    auth_failures += 1;
-                                    tracing::warn!(
-                                        attempt = auth_failures,
-                                        "client admin auth failed"
-                                    );
-                                    // Rate-limit the reply, then close: /ws is
-                                    // otherwise a free password oracle.
-                                    tokio::time::sleep(AUTH_FAILURE_DELAY).await;
-                                }
-                                let _ = out_tx
-                                    .try_send(json!({ "type": "auth.result", "ok": ok }).to_string());
-                                if auth_failures >= MAX_AUTH_FAILURES {
-                                    tracing::warn!("client exceeded admin auth attempts; closing");
-                                    break;
-                                }
-                            }
-                            Some("command") => handle_command(&state, &val, is_admin, &out_tx),
-                            _ => {}
-                        }
-                    }
-                    Message::Close(_) => break,
-                    _ => {}
+                if !handle_inbound(&state, msg, &mut is_admin, &mut auth_failures, &out_tx).await {
+                    break;
                 }
             }
         }
@@ -190,6 +158,62 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= u64::from(x ^ y);
     }
     diff == 0
+}
+
+/// Dispatches one inbound client frame; `false` closes the socket.
+async fn handle_inbound(
+    state: &Arc<AppState>,
+    msg: Message,
+    is_admin: &mut bool,
+    auth_failures: &mut u32,
+    out_tx: &mpsc::Sender<String>,
+) -> bool {
+    let text = match msg {
+        Message::Text(text) => text,
+        Message::Close(_) => return false,
+        _ => return true,
+    };
+    let Ok(val) = serde_json::from_str::<Value>(text.as_str()) else {
+        return true;
+    };
+    match val.get("type").and_then(Value::as_str) {
+        Some("auth") => return handle_auth(state, &val, is_admin, auth_failures, out_tx).await,
+        Some("command") => handle_command(state, &val, *is_admin, out_tx),
+        _ => {}
+    }
+    true
+}
+
+/// Applies one `auth` frame and replies with the result. Returns `false` once
+/// the client has burned its attempt budget and the socket must close.
+async fn handle_auth(
+    state: &Arc<AppState>,
+    val: &Value,
+    is_admin: &mut bool,
+    auth_failures: &mut u32,
+    out_tx: &mpsc::Sender<String>,
+) -> bool {
+    let ok = constant_time_eq(
+        val.get("password")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .as_bytes(),
+        state.admin_password.as_bytes(),
+    );
+    *is_admin |= ok;
+    if !ok {
+        *auth_failures += 1;
+        tracing::warn!(attempt = *auth_failures, "client admin auth failed");
+        // Rate-limit the reply, then close: /ws is otherwise a free password
+        // oracle.
+        tokio::time::sleep(AUTH_FAILURE_DELAY).await;
+    }
+    let _ = out_tx.try_send(json!({ "type": "auth.result", "ok": ok }).to_string());
+    if *auth_failures >= MAX_AUTH_FAILURES {
+        tracing::warn!("client exceeded admin auth attempts; closing");
+        return false;
+    }
+    true
 }
 
 fn handle_command(
@@ -222,16 +246,7 @@ fn handle_command(
         _ => return reject("invalid_args"),
     };
 
-    let n = state.next_seq();
-    let id = format!("cmd-{n}");
-    let cmd = json!({
-        "v": 1,
-        "type": "command",
-        "server_seq": n,
-        "id": id,
-        "name": name,
-        "args": args,
-    });
+    let (id, cmd) = command_envelope(state.next_seq(), name, args);
     let _ = tx.send(cmd.to_string());
     let _ = out_tx.try_send(
         json!({ "type": "command.queued", "id": id, "device_id": device_id }).to_string(),

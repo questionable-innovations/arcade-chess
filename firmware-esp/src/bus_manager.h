@@ -125,6 +125,8 @@ class BusManager {
   static constexpr uint8_t kQueueCapacity = 8;
   static constexpr uint8_t kMaximumQueuedPayload = 24;
   static constexpr uint8_t kMaximumCorrelationLength = 32;
+  // Shared by the POLL_EVENTS request and the reply parser that trusts its cap.
+  static constexpr uint8_t kMaximumEventsPerPoll = 8;
 
   struct QueuedCommand {
     uint8_t node = 0;
@@ -137,7 +139,21 @@ class BusManager {
   void receive(uint32_t now_ms);
   void send(uint8_t node, arcade::MessageType type, const uint8_t* payload,
             uint8_t length, const char* correlation, uint32_t now_ms);
+  // handleResponse() dispatches to one of these per pending request type; the
+  // order and the fall-through of that chain are load-bearing, see bus_response.cpp.
   void handleResponse(const arcade::Frame& frame, uint32_t now_ms);
+  void handlePollEvents(const arcade::Frame& frame, QuadrantState& node, uint32_t now_ms);
+  void handleRawScan(const arcade::Frame& frame);
+  void handleStatus(const arcade::Frame& frame, QuadrantState& node, uint32_t now_ms);
+  void handleCalibrateAccepted(const arcade::Frame& frame, QuadrantState& node,
+                               uint32_t now_ms);
+  void handleInfo(const arcade::Frame& frame, QuadrantState& node);
+  void handleSnapshot(const arcade::Frame& frame, QuadrantState& node);
+  void handlePreflight(const arcade::Frame& frame, uint32_t now_ms);
+  void handleBootloaderEntry(const arcade::Frame& frame, uint32_t now_ms);
+  void handleRawScanRejected(const arcade::Frame& frame, uint8_t node_error_code,
+                             uint32_t now_ms);
+  void purgeQueuedFirmwareCommands();
   void handleTimeout(uint32_t now_ms);
   void schedule(uint32_t now_ms);
   void startQueued(uint32_t now_ms);
@@ -147,6 +163,16 @@ class BusManager {
   void updateCalibration(uint8_t node, uint8_t phase, uint8_t percent, uint32_t now_ms);
   void openRenderWindow(uint32_t now_ms);
   void sendBroadcast(arcade::MessageType type, const uint8_t* payload, uint8_t length);
+  bool planSquareFanout(const uint8_t* squares, size_t count, bool all,
+                        uint16_t (&masks)[arcade::kQuadrantCount],
+                        bool (&targeted)[arcade::kQuadrantCount],
+                        int8_t& last_node) const;
+  // Formats one diagnostic-channel line. The paired Serial.printf() stays
+  // separate at each site: it carries fields the log message deliberately omits.
+  // The format attribute keeps -Wformat on the call sites (index 5/6 counts the
+  // implicit `this`); without it the wrapper silently swallows argument mismatches.
+  void logf(const char* level, const char* component, uint8_t node,
+            const char* format, ...) const __attribute__((format(printf, 5, 6)));
 
   HardwareSerial* serial_ = nullptr;
   BusCallbacks callbacks_{};

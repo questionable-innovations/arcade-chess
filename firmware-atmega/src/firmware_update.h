@@ -25,6 +25,11 @@ class FirmwareUpdate {
   UpdateState markerState() const { return marker_.state; }
 
  private:
+  uint8_t stagingRefusal(uint32_t token, uint32_t image_size) const;
+  void stagePrepare(const uint8_t* payload, uint32_t token, uint32_t image_size);
+  bool handoffAuthorised(uint32_t token, uint32_t update_id) const;
+  void clearMaintenance();
+
   const Identity& identity_;
   Sensors& sensors_;
   Lighting& lighting_;

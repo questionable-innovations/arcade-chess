@@ -28,6 +28,8 @@ class ProtocolService {
   void serviceRawResponse();
   void sendFrame(arcade::Frame& response);
   void sendError(arcade::Frame& response, const arcade::Frame& request, uint8_t code);
+  bool requirePayload(arcade::Frame& response, const arcade::Frame& request,
+                      uint8_t bytes);
   void beginResponse(arcade::Frame& response, uint8_t destination, uint8_t sequence,
                      arcade::MessageType type) const;
   bool applyConfig(uint8_t key, uint16_t value);

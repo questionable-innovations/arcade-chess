@@ -73,6 +73,46 @@ void FirmwareUpdate::begin() {
   }
 }
 
+// Refusal code for the preconditions the addressed and broadcast FW_PREPARE
+// paths share, or 0 when the node may stage the image. Distinct codes: a single
+// "busy" hides which precondition actually failed, and the ESP has no other way
+// to see this node's sensor state.
+uint8_t FirmwareUpdate::stagingRefusal(uint32_t token, uint32_t image_size) const {
+  if (!token || token != maintenance_token_) return 8;
+  if (!image_size || image_size > arcade::kAvrApplicationLimit) return 9;
+  if (sensors_.calibrating()) return 10;
+  // Refuse only while the ADC is mid-sweep. A finished capture is discarded:
+  // its response is worthless across the reboot into the bootloader, and an
+  // unclaimed one would otherwise veto every future update.
+  if (sensors_.rawCaptureSampling()) return 11;
+  return 0;
+}
+
+void FirmwareUpdate::stagePrepare(const uint8_t* payload, uint32_t token,
+                                  uint32_t image_size) {
+  sensors_.abortRawCapture();
+  marker_.state = UpdateState::kRequested;
+  marker_.node_id = identity_.node_id;
+  marker_.token = token;
+  marker_.update_id = arcade::getU32(payload + kPrepareUpdateIdOffset);
+  marker_.image_size = image_size;
+  marker_.image_crc32 = arcade::getU32(payload + kPrepareImageCrcOffset);
+  saveUpdateMarker(marker_);
+}
+
+// A handoff is only honoured against the exact image this node staged under the
+// still-current maintenance lease.
+bool FirmwareUpdate::handoffAuthorised(uint32_t token, uint32_t update_id) const {
+  return marker_.state == UpdateState::kRequested && marker_.token == token &&
+         marker_.update_id == update_id && token == maintenance_token_;
+}
+
+void FirmwareUpdate::clearMaintenance() {
+  maintenance_active_ = false;
+  maintenance_target_ = arcade::kInvalidNodeAddress;
+  maintenance_token_ = 0;
+}
+
 bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
   if (request.destination != arcade::kBroadcastAddress ||
       request.flags & arcade::kResponse) return false;
@@ -80,74 +120,65 @@ bool FirmwareUpdate::handleBroadcast(const arcade::Frame& request) {
   // undefined and the maintenance target checks would alias kBroadcastAddress. It
   // can never be a flash target anyway, so opt it out of the whole path.
   if (identity_.node_id >= arcade::kQuadrantCount) return false;
-  if (request.type == arcade::MessageType::kMaintenanceBegin &&
-      request.payload_length == kMaintenanceBeginBytes) {
-    maintenance_target_ = request.payload[kMaintenanceTargetOffset];
-    maintenance_token_ = arcade::getU32(request.payload + kMaintenanceTokenOffset);
-    maintenance_until_ms_ = millis() +
-        arcade::getU16(request.payload + kMaintenanceLeaseOffset);
-    maintenance_active_ = (maintenance_target_ < arcade::kQuadrantCount ||
-                           maintenance_target_ == arcade::kBroadcastAddress) &&
-                          maintenance_token_ != 0;
-    broadcast_refusal_ = 0;  // per-attempt; a stale code would misdirect the next
-    return true;
-  }
-  if (request.type == arcade::MessageType::kFwPrepare &&
-      request.payload_length == kPrepareBytes && maintenance_active_ &&
-      maintenance_target_ == arcade::kBroadcastAddress) {
-    const uint32_t token = arcade::getU32(request.payload + kPrepareTokenOffset);
-    const uint32_t image_size =
-        arcade::getU32(request.payload + kPrepareImageSizeOffset);
-    // A broadcast carries no response, so a refusal here is invisible on the bus
-    // and surfaces ~10 s later as a bootloader sync timeout that points at the
-    // baud rate rather than at whatever actually refused. Latch the same code the
-    // addressed path returns; FW_PREFLIGHT reports it.
-    if (!system_info::residentBootloaderEnabled()) broadcast_refusal_ = 6;
-    else if (!token || token != maintenance_token_) broadcast_refusal_ = 8;
-    else if (!image_size || image_size > arcade::kAvrApplicationLimit)
-      broadcast_refusal_ = 9;
-    else if (sensors_.calibrating()) broadcast_refusal_ = 10;
-    else if (sensors_.rawCaptureSampling()) broadcast_refusal_ = 11;
-    else broadcast_refusal_ = 0;
-    if (broadcast_refusal_) return true;
-    sensors_.abortRawCapture();
-    marker_.state = UpdateState::kRequested;
-    marker_.node_id = identity_.node_id;
-    marker_.token = token;
-    marker_.update_id = arcade::getU32(request.payload + kPrepareUpdateIdOffset);
-    marker_.image_size = image_size;
-    marker_.image_crc32 = arcade::getU32(request.payload + kPrepareImageCrcOffset);
-    saveUpdateMarker(marker_);
-    return true;
-  }
-  if (request.type == arcade::MessageType::kFwEnterBootloader &&
-      request.payload_length == kBroadcastEnterBootloaderBytes &&
-      maintenance_active_ && maintenance_target_ == arcade::kBroadcastAddress) {
-    const uint8_t target_mask = request.payload[kBroadcastTargetMaskOffset];
-    const uint8_t leader = request.payload[kBroadcastLeaderOffset];
-    if (leader >= arcade::kQuadrantCount || !(target_mask & (1U << leader)))
+  switch (request.type) {
+    case arcade::MessageType::kMaintenanceBegin: {
+      if (request.payload_length != kMaintenanceBeginBytes) return false;
+      maintenance_target_ = request.payload[kMaintenanceTargetOffset];
+      maintenance_token_ = arcade::getU32(request.payload + kMaintenanceTokenOffset);
+      maintenance_until_ms_ = millis() +
+          arcade::getU16(request.payload + kMaintenanceLeaseOffset);
+      maintenance_active_ = (maintenance_target_ < arcade::kQuadrantCount ||
+                             maintenance_target_ == arcade::kBroadcastAddress) &&
+                            maintenance_token_ != 0;
+      broadcast_refusal_ = 0;  // per-attempt; a stale code would misdirect the next
       return true;
-    if (!(target_mask & (1U << identity_.node_id))) return true;
-    const uint32_t token = arcade::getU32(request.payload);
-    const uint32_t update_id =
-        arcade::getU32(request.payload + kPrepareUpdateIdOffset);
-    if (marker_.state != UpdateState::kRequested || marker_.token != token ||
-        marker_.update_id != update_id || token != maintenance_token_) return true;
-    marker_.state = UpdateState::kProgramming;
-    saveUpdateMarker(marker_);
-    bootloader_responder_ = leader == identity_.node_id;
-    reset_pending_ = true;
-    return true;
+    }
+
+    case arcade::MessageType::kFwPrepare: {
+      if (request.payload_length != kPrepareBytes || !maintenance_active_ ||
+          maintenance_target_ != arcade::kBroadcastAddress) return false;
+      const uint32_t token = arcade::getU32(request.payload + kPrepareTokenOffset);
+      const uint32_t image_size =
+          arcade::getU32(request.payload + kPrepareImageSizeOffset);
+      // A broadcast carries no response, so a refusal here is invisible on the bus
+      // and surfaces ~10 s later as a bootloader sync timeout that points at the
+      // baud rate rather than at whatever actually refused. Latch the same code the
+      // addressed path returns; FW_PREFLIGHT reports it.
+      broadcast_refusal_ = system_info::residentBootloaderEnabled()
+          ? stagingRefusal(token, image_size) : 6;
+      if (broadcast_refusal_) return true;
+      stagePrepare(request.payload, token, image_size);
+      return true;
+    }
+
+    case arcade::MessageType::kFwEnterBootloader: {
+      if (request.payload_length != kBroadcastEnterBootloaderBytes ||
+          !maintenance_active_ ||
+          maintenance_target_ != arcade::kBroadcastAddress) return false;
+      const uint8_t target_mask = request.payload[kBroadcastTargetMaskOffset];
+      const uint8_t leader = request.payload[kBroadcastLeaderOffset];
+      if (leader >= arcade::kQuadrantCount || !(target_mask & (1U << leader)))
+        return true;
+      if (!(target_mask & (1U << identity_.node_id))) return true;
+      if (!handoffAuthorised(arcade::getU32(request.payload),
+                             arcade::getU32(request.payload + kPrepareUpdateIdOffset)))
+        return true;
+      marker_.state = UpdateState::kProgramming;
+      saveUpdateMarker(marker_);
+      bootloader_responder_ = leader == identity_.node_id;
+      reset_pending_ = true;
+      return true;
+    }
+
+    case arcade::MessageType::kMaintenanceEnd: {
+      if (request.payload_length != kTokenBytes ||
+          arcade::getU32(request.payload) != maintenance_token_) return false;
+      clearMaintenance();
+      return true;
+    }
+
+    default: return false;
   }
-  if (request.type == arcade::MessageType::kMaintenanceEnd &&
-      request.payload_length == kTokenBytes &&
-      arcade::getU32(request.payload) == maintenance_token_) {
-    maintenance_active_ = false;
-    maintenance_target_ = arcade::kInvalidNodeAddress;
-    maintenance_token_ = 0;
-    return true;
-  }
-  return false;
 }
 
 bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
@@ -181,25 +212,9 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
       }
       const uint32_t token = arcade::getU32(request.payload + kPrepareTokenOffset);
       const uint32_t image_size = arcade::getU32(request.payload + kPrepareImageSizeOffset);
-      // Distinct codes: a single "busy" hides which precondition actually failed,
-      // and the ESP has no other way to see this node's sensor state.
-      if (!token || token != maintenance_token_) { error_code = 8; return true; }
-      if (!image_size || image_size > arcade::kAvrApplicationLimit) {
-        error_code = 9; return true;
-      }
-      if (sensors_.calibrating()) { error_code = 10; return true; }
-      // Refuse only while the ADC is mid-sweep. A finished capture is discarded:
-      // its response is worthless across the reboot into the bootloader, and an
-      // unclaimed one would otherwise veto every future update.
-      if (sensors_.rawCaptureSampling()) { error_code = 11; return true; }
-      sensors_.abortRawCapture();
-      marker_.state = UpdateState::kRequested;
-      marker_.node_id = identity_.node_id;
-      marker_.token = token;
-      marker_.update_id = arcade::getU32(request.payload + kPrepareUpdateIdOffset);
-      marker_.image_size = image_size;
-      marker_.image_crc32 = arcade::getU32(request.payload + kPrepareImageCrcOffset);
-      saveUpdateMarker(marker_);
+      error_code = stagingRefusal(token, image_size);
+      if (error_code) return true;
+      stagePrepare(request.payload, token, image_size);
       arcade::putU32(response.payload, marker_.token);
       arcade::putU32(response.payload + 4, marker_.update_id);
       response.payload_length = kEnterBootloaderBytes;
@@ -213,10 +228,7 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
       if (!maintenance_active_ || maintenance_target_ != identity_.node_id) {
         error_code = 7; return true;
       }
-      if (marker_.state != UpdateState::kRequested || marker_.token != token ||
-          marker_.update_id != update_id || token != maintenance_token_) {
-        error_code = 8; return true;
-      }
+      if (!handoffAuthorised(token, update_id)) { error_code = 8; return true; }
       marker_.state = UpdateState::kProgramming;
       saveUpdateMarker(marker_);
       arcade::putU32(response.payload, token);
@@ -257,9 +269,7 @@ bool FirmwareUpdate::handleRequest(const arcade::Frame& request,
 
 void FirmwareUpdate::tick(uint32_t now_ms) {
   if (maintenance_active_ && static_cast<int32_t>(now_ms - maintenance_until_ms_) >= 0) {
-    maintenance_active_ = false;
-    maintenance_target_ = arcade::kInvalidNodeAddress;
-    maintenance_token_ = 0;
+    clearMaintenance();
   }
   if (!reset_pending_) return;
   lighting_.shutdownNow();

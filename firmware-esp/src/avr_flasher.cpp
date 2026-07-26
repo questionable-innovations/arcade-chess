@@ -14,15 +14,6 @@ constexpr uint32_t kBusBaud = arcade::kBusBaud;
 // faster is limited by the return path, not the divisor: quadrant TXD reaches
 // the ESP through D8 with only R1=10k pulling up, so rising edges take ~1us.
 constexpr uint32_t kBootloaderBaud = 76800;
-// This provisioned urboot u8.0 build encodes its MCU/features in response bytes.
-constexpr uint8_t kUrInSync = 0xe0;
-constexpr uint8_t kUrOk = 0x78;
-constexpr uint8_t kCrcEop = 0x20;
-constexpr uint8_t kUrGetSync = 0x30;
-constexpr uint8_t kUrProgramFlashPage = 0x02;
-constexpr uint8_t kUrReadFlashPage = 0x03;
-constexpr uint8_t kUrLeaveProgmode = 0x51;
-constexpr uint8_t kUrResponseOverhead = 2;
 constexpr uint8_t kMaximumPageRetries = 3;
 constexpr uint8_t kMaximumHealthPollRetries = 4;
 constexpr uint8_t kMaximumSyncAttempts = 80;
@@ -31,27 +22,11 @@ constexpr uint32_t kHandoffTimeoutMs = 8000;
 constexpr uint32_t kBootResetDelayMs = 50;
 constexpr uint32_t kApplicationBootDelayMs = 1500;
 constexpr uint32_t kHealthResponseTimeoutMs = 3000;
-constexpr uint32_t kSyncCommandTimeoutMs = 80;
-constexpr uint32_t kPageCommandTimeoutMs = 400;
-constexpr uint32_t kLeaveProgrammingTimeoutMs = 300;
-constexpr uint16_t kSerialPollDelayUs = 200;
-constexpr uint8_t kHexMaximumDataBytes = UINT8_MAX;
-constexpr uint8_t kHexFixedRecordBytes = 5;  // count, address, type, checksum
-constexpr uint8_t kHexHeaderBytes = 4;
 constexpr uint8_t kHealthPayloadBytes = 14;
 constexpr uint8_t kHealthMarkerOffset = 0;
 constexpr uint8_t kHealthResetCauseOffset = 1;
 constexpr uint8_t kHealthUpdateIdOffset = 6;
 constexpr uint8_t kHealthCrcOffset = 10;
-
-enum class HexRecordType : uint8_t {
-  kData = 0x00,
-  kEndOfFile = 0x01,
-  kExtendedSegmentAddress = 0x02,
-  kStartSegmentAddress = 0x03,
-  kExtendedLinearAddress = 0x04,
-  kStartLinearAddress = 0x05,
-};
 
 uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t length) {
   crc = ~crc;
@@ -62,19 +37,6 @@ uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t length) {
     }
   }
   return ~crc;
-}
-
-int hexNibble(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  return -1;
-}
-
-int hexByte(const char* s) {
-  const int high = hexNibble(s[0]);
-  const int low = hexNibble(s[1]);
-  return high < 0 || low < 0 ? -1 : (high << 4) | low;
 }
 
 uint32_t nonzeroRandom() {
@@ -151,60 +113,6 @@ bool AvrFlasher::consumeLine(const char* line) {
   if (eof_seen_) finishReceive();
   else Serial.println(F("+"));
   return true;
-}
-
-bool AvrFlasher::parseHexLine(const char* line) {
-  const size_t text_length = strlen(line + 1);
-  if (text_length < kHexFixedRecordBytes * 2 || text_length % 2) {
-    fail("short/odd hex record"); return false;
-  }
-  uint8_t record[kHexHeaderBytes + kHexMaximumDataBytes + 1];
-  const size_t byte_count = text_length / 2;
-  if (byte_count > sizeof(record)) { fail("oversized hex record"); return false; }
-  uint8_t checksum = 0;
-  for (size_t i = 0; i < byte_count; ++i) {
-    const int value = hexByte(line + 1 + i * 2);
-    if (value < 0) { fail("bad hex digit"); return false; }
-    record[i] = static_cast<uint8_t>(value);
-    checksum += record[i];
-  }
-  const uint8_t length = record[0];
-  if (byte_count != kHexFixedRecordBytes + length) {
-    fail("record length mismatch"); return false;
-  }
-  if (checksum) { fail("record checksum mismatch"); return false; }
-  const uint16_t address = static_cast<uint16_t>(record[1]) << 8 | record[2];
-  const uint8_t type = record[3];
-  const uint8_t* data = record + 4;
-
-  switch (static_cast<HexRecordType>(type)) {
-    case HexRecordType::kData: {
-      const uint32_t absolute = ext_base_ + address;
-      if (absolute >= kAppLimit || length > kAppLimit - absolute) {
-        fail("record beyond application limit"); return false;
-      }
-      memcpy(image_ + absolute, data, length);
-      if (absolute + length > image_size_) image_size_ = absolute + length;
-      return true;
-    }
-    case HexRecordType::kEndOfFile:
-      eof_seen_ = true;
-      return true;
-    case HexRecordType::kExtendedSegmentAddress:
-      if (length != 2) { fail("bad extended address record"); return false; }
-      ext_base_ = (static_cast<uint32_t>(data[0]) << 8 | data[1]) << 4;
-      return true;
-    case HexRecordType::kExtendedLinearAddress:
-      if (length != 2) { fail("bad extended address record"); return false; }
-      ext_base_ = (static_cast<uint32_t>(data[0]) << 8 | data[1]) << 16;
-      return true;
-    case HexRecordType::kStartSegmentAddress:
-    case HexRecordType::kStartLinearAddress:  // start records carry no flash data
-      return true;
-    default:
-      fail("unsupported hex record type");
-      return false;
-  }
 }
 
 void AvrFlasher::finishReceive() {
@@ -428,60 +336,4 @@ void AvrFlasher::restoreBusBaud() {
   serial_->updateBaudRate(kBusBaud);
   while (serial_->available()) serial_->read();
   bus_baud_switched_ = false;
-}
-
-bool AvrFlasher::urCommand(const uint8_t* request, size_t request_length,
-                           uint8_t* response, size_t response_length,
-                           uint32_t timeout_ms) {
-  while (serial_->available()) serial_->read();
-  serial_->write(request, request_length);
-  serial_->flush();
-  uint8_t framed[kUrResponseOverhead + kPageSize];
-  const size_t total = response_length + kUrResponseOverhead;
-  if (total > sizeof(framed)) return false;
-  const uint32_t deadline = millis() + timeout_ms;
-  size_t received = 0;
-  while (received < total) {
-    if (static_cast<int32_t>(millis() - deadline) >= 0) return false;
-    const int value = serial_->read();
-    if (value < 0) { delayMicroseconds(kSerialPollDelayUs); continue; }
-    framed[received++] = static_cast<uint8_t>(value);
-  }
-  if (framed[0] != kUrInSync || framed[total - 1] != kUrOk) return false;
-  if (response_length) memcpy(response, framed + 1, response_length);
-  return true;
-}
-
-bool AvrFlasher::urSync() {
-  const uint8_t request[] = {kUrGetSync, kCrcEop};
-  return urCommand(request, sizeof(request), nullptr, 0, kSyncCommandTimeoutMs);
-}
-
-bool AvrFlasher::urProgramPage(uint32_t byte_address) {
-  uint8_t request[4 + kPageSize + 1];
-  request[0] = kUrProgramFlashPage;
-  // Urprotocol carries the direct byte address, low byte first.
-  request[1] = static_cast<uint8_t>(byte_address);
-  request[2] = static_cast<uint8_t>(byte_address >> 8);
-  request[3] = static_cast<uint8_t>(kPageSize);
-  memcpy(request + 4, image_ + byte_address, kPageSize);
-  request[4 + kPageSize] = kCrcEop;
-  return urCommand(request, sizeof(request), nullptr, 0, kPageCommandTimeoutMs);
-}
-
-bool AvrFlasher::urVerifyPage(uint32_t byte_address) {
-  const uint8_t request[] = {kUrReadFlashPage,
-                             static_cast<uint8_t>(byte_address),
-                             static_cast<uint8_t>(byte_address >> 8),
-                             static_cast<uint8_t>(kPageSize), kCrcEop};
-  uint8_t page[kPageSize];
-  if (!urCommand(request, sizeof(request), page, kPageSize,
-                 kPageCommandTimeoutMs)) return false;
-  return memcmp(page, image_ + byte_address, kPageSize) == 0;
-}
-
-bool AvrFlasher::urLeaveProgmode() {
-  const uint8_t request[] = {kUrLeaveProgmode, kCrcEop};
-  return urCommand(request, sizeof(request), nullptr, 0,
-                   kLeaveProgrammingTimeoutMs);
 }

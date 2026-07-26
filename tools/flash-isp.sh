@@ -90,13 +90,7 @@ fi
 
 find_avrdude
 resolve_programmer
-avrdude_args=(-C "$avrdude_conf" -p m328pb -c "$programmer")
-if [[ "$programmer" == "arduino_as_isp" ]]; then
-  avrdude_args+=(-b "$programmer_baud")
-else
-  avrdude_args+=(-B "$bitclock")
-fi
-if [[ -n "$port" ]]; then avrdude_args+=(-P "$port"); fi
+avrdude_base_args
 
 echo "Target: ATmega328PB via $programmer${port:+ at $port}"
 echo "Image:  $hex"

@@ -1,12 +1,14 @@
 # shellcheck shell=bash
 # Shared ISP plumbing for provision-quadrant.sh and flash-isp.sh.
 #
-# Sourced, never executed. Callers declare `programmer`, `port` and
-# `programmer_baud` as globals, then call resolve_programmer to fill them in.
+# Sourced, never executed. Callers declare `programmer`, `port`,
+# `programmer_baud` and `bitclock` as globals, then call resolve_programmer to
+# fill them in.
 #
 # shellcheck disable=SC2034  # the globals set here are read by the callers
 
 ARDUINO_ISP_BAUD=19200
+AVRDUDE_PART=m328pb
 
 find_pio() {
   if command -v pio >/dev/null 2>&1; then
@@ -81,4 +83,19 @@ resolve_programmer() {
     programmer_baud="${programmer_baud:-$ARDUINO_ISP_BAUD}"
     if [[ -z "${port:-}" ]]; then detect_arduino_isp_port; fi
   fi
+}
+
+# Fills in $avrdude_args, the invocation prefix every avrdude call shares. Run
+# after find_avrdude and resolve_programmer. Arduino as ISP is a serial
+# stk500v1 link with a fixed sketch baud, so it takes -b; a USBasp drives SPI
+# directly and takes the -B bit-clock period instead.
+# shellcheck disable=SC2154  # $bitclock is one of the caller-declared globals
+avrdude_base_args() {
+  avrdude_args=(-C "$avrdude_conf" -p "$AVRDUDE_PART" -c "$programmer")
+  if [[ "$programmer" == "arduino_as_isp" ]]; then
+    avrdude_args+=(-b "$programmer_baud")
+  else
+    avrdude_args+=(-B "$bitclock")
+  fi
+  if [[ -n "${port:-}" ]]; then avrdude_args+=(-P "$port"); fi
 }

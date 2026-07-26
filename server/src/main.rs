@@ -1,11 +1,15 @@
 mod client;
 mod device;
+mod device_entry;
 mod state;
+mod util;
 
 use std::sync::Arc;
 
+use axum::extract::State;
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
+use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -54,7 +58,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/api/state", get(state::api_state))
+        .route("/api/state", get(api_state))
         .route("/board", get(device::board_ws))
         .route("/ws", get(client::client_ws))
         .layer(CorsLayer::permissive())
@@ -70,4 +74,8 @@ async fn main() {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn api_state(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "devices": state.snapshot_views(), "server": state.server_view() }))
 }

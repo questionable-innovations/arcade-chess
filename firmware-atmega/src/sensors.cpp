@@ -10,6 +10,8 @@ namespace quadrant {
 namespace {
 constexpr uint8_t kMuxLowPins[3] = {PIN_PB0, PIN_PB1, PIN_PB2};
 constexpr uint8_t kMuxHighPins[3] = {PIN_PD4, PIN_PD5, PIN_PD6};
+// First-order IIR: each scan folds in a quarter of the new reading.
+constexpr int16_t kFilterDivisor = 4;
 }
 
 void Sensors::begin() {
@@ -33,6 +35,13 @@ void Sensors::setMux(uint8_t channel) {
   }
 }
 
+void Sensors::storeSample(uint8_t square, uint16_t value) {
+  raw_[square] = value;
+  filtered_[square] = static_cast<uint16_t>(filtered_[square] +
+      (static_cast<int16_t>(value) - static_cast<int16_t>(filtered_[square])) /
+          kFilterDivisor);
+}
+
 void Sensors::tick(uint32_t now_us, uint32_t now_ms) {
   if (static_cast<int32_t>(now_us - deadline_us_) < 0) return;
   if (phase_ == 0) {
@@ -49,14 +58,8 @@ void Sensors::tick(uint32_t now_us, uint32_t now_ms) {
   const uint16_t high = analogRead(A1);
   // Both muxes step through the same channel counter, but neither presents its
   // squares in that order, so the sample is stored where the square lives.
-  const uint8_t low_index = board_map::kSquareForLowChannel[channel_];
-  const uint8_t high_index = board_map::kSquareForHighChannel[channel_];
-  raw_[low_index] = low;
-  raw_[high_index] = high;
-  filtered_[low_index] = static_cast<uint16_t>(filtered_[low_index] +
-      (static_cast<int16_t>(low) - static_cast<int16_t>(filtered_[low_index])) / 4);
-  filtered_[high_index] = static_cast<uint16_t>(filtered_[high_index] +
-      (static_cast<int16_t>(high) - static_cast<int16_t>(filtered_[high_index])) / 4);
+  storeSample(board_map::kSquareForLowChannel[channel_], low);
+  storeSample(board_map::kSquareForHighChannel[channel_], high);
 
   channel_ = static_cast<uint8_t>((channel_ + 1) % bringup::kMuxChannelCount);
   if (channel_ == 0) completeScan(now_ms);
@@ -72,58 +75,62 @@ void Sensors::tick(uint32_t now_us, uint32_t now_ms) {
 void Sensors::completeScan(uint32_t now_ms) {
   ++scan_count_;
   last_scan_ms_ = static_cast<uint16_t>(now_ms);
-  if (raw_capture_active_) {
-    for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) raw_capture_sum_[i] += raw_[i];
-    if (++raw_capture_count_ >= raw_capture_target_) {
-      for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
-        raw_capture_average_[i] = static_cast<uint16_t>(raw_capture_sum_[i] / raw_capture_count_);
-      }
-      raw_capture_active_ = false;
-      raw_capture_ready_ = true;
-    }
-  }
+  if (raw_capture_active_) accumulateRawCapture();
   if (calibration_active_) {
-    for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
-      calibration_sum_[i] += raw_[i];
-      if (raw_[i] < calibration_min_[i]) calibration_min_[i] = raw_[i];
-      if (raw_[i] > calibration_max_[i]) calibration_max_[i] = raw_[i];
-    }
-    if (++calibration_scans_ >= bringup::kCalibrationScans) {
-      calibration_ok_ = true;
-      for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
-        const uint16_t baseline = static_cast<uint16_t>(
-            calibration_sum_[i] / calibration_scans_);
-        const uint16_t range = calibration_max_[i] - calibration_min_[i];
-        if (baseline < bringup::kMinimumCalibrationBaseline ||
-            baseline > bringup::kMaximumCalibrationBaseline ||
-            range > bringup::kMaximumCalibrationNoise) {
-          calibration_ok_ = false;
-          break;
-        }
-      }
-      // Validate before committing: settings_ is shared with ProtocolService, so
-      // a rejected run's baselines would blank the fault out of the raw-scan
-      // heatmap (raw - baseline == 0 on a pinned square) and would be persisted
-      // by the next unrelated saveSettings() from a brightness/config command.
-      // A failed run leaves the previous good calibration in force; the failure
-      // is reported through calibrationPhaseCode() instead.
-      if (calibration_ok_) {
-        for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
-          const uint16_t range = calibration_max_[i] - calibration_min_[i];
-          settings_.baseline[i] = static_cast<uint16_t>(
-              calibration_sum_[i] / calibration_scans_);
-          settings_.noise[i] = range > 255 ? 255 : static_cast<uint8_t>(range);
-        }
-        settings_.calibrated = 1;
-        saveSettings(settings_);
-      }
-      calibration_active_ = false;
-      calibration_finished_ = true;
-      calibration_has_result_ = true;
-    }
+    accumulateCalibration();
     return;
   }
   for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) updateClassification(i, now_ms);
+}
+
+void Sensors::accumulateRawCapture() {
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) raw_capture_sum_[i] += raw_[i];
+  if (++raw_capture_count_ < raw_capture_target_) return;
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+    raw_capture_average_[i] = static_cast<uint16_t>(raw_capture_sum_[i] / raw_capture_count_);
+  }
+  raw_capture_active_ = false;
+  raw_capture_ready_ = true;
+}
+
+void Sensors::accumulateCalibration() {
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+    calibration_sum_[i] += raw_[i];
+    if (raw_[i] < calibration_min_[i]) calibration_min_[i] = raw_[i];
+    if (raw_[i] > calibration_max_[i]) calibration_max_[i] = raw_[i];
+  }
+  if (++calibration_scans_ >= bringup::kCalibrationScans) finishCalibration();
+}
+
+void Sensors::finishCalibration() {
+  calibration_ok_ = true;
+  for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+    const uint16_t baseline = calibrationBaseline(i);
+    if (baseline < bringup::kMinimumCalibrationBaseline ||
+        baseline > bringup::kMaximumCalibrationBaseline ||
+        calibrationRange(i) > bringup::kMaximumCalibrationNoise) {
+      calibration_ok_ = false;
+      break;
+    }
+  }
+  // Validate before committing: settings_ is shared with ProtocolService, so
+  // a rejected run's baselines would blank the fault out of the raw-scan
+  // heatmap (raw - baseline == 0 on a pinned square) and would be persisted
+  // by the next unrelated saveSettings() from a brightness/config command.
+  // A failed run leaves the previous good calibration in force; the failure
+  // is reported through calibrationPhaseCode() instead.
+  if (calibration_ok_) {
+    for (uint8_t i = 0; i < arcade::kSquaresPerQuadrant; ++i) {
+      const uint16_t range = calibrationRange(i);
+      settings_.baseline[i] = calibrationBaseline(i);
+      settings_.noise[i] = range > 255 ? 255 : static_cast<uint8_t>(range);
+    }
+    settings_.calibrated = 1;
+    saveSettings(settings_);
+  }
+  calibration_active_ = false;
+  calibration_finished_ = true;
+  calibration_has_result_ = true;
 }
 
 void Sensors::updateClassification(uint8_t square, uint32_t now_ms) {

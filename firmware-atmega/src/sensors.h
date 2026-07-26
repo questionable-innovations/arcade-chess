@@ -47,7 +47,17 @@ class Sensors {
 
  private:
   void setMux(uint8_t channel);
+  void storeSample(uint8_t square, uint16_t value);
   void completeScan(uint32_t now_ms);
+  void accumulateRawCapture();
+  void accumulateCalibration();
+  void finishCalibration();
+  uint16_t calibrationBaseline(uint8_t square) const {
+    return static_cast<uint16_t>(calibration_sum_[square] / calibration_scans_);
+  }
+  uint16_t calibrationRange(uint8_t square) const {
+    return static_cast<uint16_t>(calibration_max_[square] - calibration_min_[square]);
+  }
   void updateClassification(uint8_t square, uint32_t now_ms);
   void queueEvent(uint8_t square, uint32_t now_ms);
 

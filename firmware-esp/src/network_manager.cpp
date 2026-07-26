@@ -86,29 +86,28 @@ void NetworkManager::tick(uint32_t now_ms) {
   }
   if (welcomed_ && static_cast<int32_t>(now_ms - next_status_ms_) >= 0) {
     JsonDocument doc;
-    doc["v"] = 1; doc["type"] = "device.status"; doc["device_id"] = config_->device_id;
-    doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-    doc["at_ms"] = now_ms; doc["data"]["rssi"] = WiFi.RSSI();
-    doc["data"]["heap"] = ESP.getFreeHeap();
+    JsonObject data = beginEvent(doc, "device.status", now_ms);
+    data["rssi"] = WiFi.RSSI();
+    data["heap"] = ESP.getFreeHeap();
     // `uptime` is the misnamed original; keep it one release while consumers
     // move to uptime_ms.
-    doc["data"]["uptime"] = now_ms;
-    doc["data"]["uptime_ms"] = now_ms;
-    doc["data"]["websocket_reconnects"] = reconnects_;
-    doc["data"]["ws_send_failed"] = ws_send_failed_;
-    doc["data"]["events_dropped_offline"] = events_dropped_offline_;
-    doc["data"]["snapshot_repairs"] = bus_->snapshotRepairs();
-    doc["data"]["raw_stream"] = raw_stream_enabled_;
-    doc["data"]["trace"] = trace_enabled_;
-    doc["data"]["reset_reason"] = static_cast<uint8_t>(esp_reset_reason());
-    doc["data"]["uart_good"] = bus_->goodFrames();
-    doc["data"]["uart_bad"] = bus_->badFrames();
-    doc["data"]["uart_timeouts"] = bus_->timeoutCount();
-    doc["data"]["quadrant_mask"] = bus_->onlineMask();
-    doc["data"]["quadrant_count"] = bus_->onlineCount();
-    doc["data"]["mode"] = runtime_mode_ == arcade::RuntimeMode::kBringup
+    data["uptime"] = now_ms;
+    data["uptime_ms"] = now_ms;
+    data["websocket_reconnects"] = reconnects_;
+    data["ws_send_failed"] = ws_send_failed_;
+    data["events_dropped_offline"] = events_dropped_offline_;
+    data["snapshot_repairs"] = bus_->snapshotRepairs();
+    data["raw_stream"] = raw_stream_enabled_;
+    data["trace"] = trace_enabled_;
+    data["reset_reason"] = static_cast<uint8_t>(esp_reset_reason());
+    data["uart_good"] = bus_->goodFrames();
+    data["uart_bad"] = bus_->badFrames();
+    data["uart_timeouts"] = bus_->timeoutCount();
+    data["quadrant_mask"] = bus_->onlineMask();
+    data["quadrant_count"] = bus_->onlineCount();
+    data["mode"] = runtime_mode_ == arcade::RuntimeMode::kBringup
         ? "bringup" : "normal";
-    String json; serializeJson(doc, json); sendJson(json);
+    sendJson(doc);
     next_status_ms_ = now_ms + kStatusPublishIntervalMs;
   }
   if (raw_stream_enabled_ && (!raw_stream_until_ms_ ||
@@ -167,7 +166,15 @@ void NetworkManager::sendHello() {
   JsonArray caps = doc["capabilities"].to<JsonArray>();
   caps.add("board.snapshot"); caps.add("sensor.events"); caps.add("sensor.raw_scan");
   caps.add("lighting.basic"); caps.add("diagnostics");
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
+}
+
+JsonObject NetworkManager::beginEvent(JsonDocument& doc, const char* type,
+                                      uint32_t at_ms) {
+  doc["v"] = 1; doc["type"] = type; doc["device_id"] = config_->device_id;
+  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
+  doc["at_ms"] = at_ms;
+  return doc["data"].to<JsonObject>();
 }
 
 const char* NetworkManager::stateName(arcade::SensorState state) const {
@@ -183,13 +190,12 @@ void NetworkManager::publishSensor(uint8_t square, arcade::SensorState state,
                                    uint16_t raw, uint8_t node, uint8_t local) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "sensor.changed"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = millis(); doc["data"]["square"] = square;
-  doc["data"]["state"] = stateName(state); doc["data"]["raw"] = raw;
-  doc["data"]["node"] = node; doc["data"]["local_square"] = local;
-  doc["data"]["baseline"] = bus_->node(node).baseline[local];
-  String json; serializeJson(doc, json); sendJson(json);
+  JsonObject data = beginEvent(doc, "sensor.changed", millis());
+  data["square"] = square;
+  data["state"] = stateName(state); data["raw"] = raw;
+  data["node"] = node; data["local_square"] = local;
+  data["baseline"] = bus_->node(node).baseline[local];
+  sendJson(doc);
 }
 
 void NetworkManager::publishNodeStatus(uint8_t node) {
@@ -197,9 +203,7 @@ void NetworkManager::publishNodeStatus(uint8_t node) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   const QuadrantState& q = bus_->node(node);
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "node.status"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "node.status", millis());
   data["node"] = node; data["online"] = q.online; data["calibrated"] = q.calibrated;
   data["reset_cause"] = q.reset_cause; data["timeouts"] = q.timeouts;
   data["consecutive_timeouts"] = q.consecutive_timeouts;
@@ -222,15 +226,13 @@ void NetworkManager::publishNodeStatus(uint8_t node) {
              q.fw_version[0], q.fw_version[1], q.fw_version[2]);
     data["firmware"] = firmware;
   }
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "sensor.raw_scan"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "sensor.raw_scan", millis());
   data["scan_id"] = scan_id; data["complete"] = complete; data["captured_ms"] = millis();
   data["target_node_mask"] = bus_->rawTargetMask();
   data["response_node_mask"] = bus_->rawResponseMask();
@@ -250,7 +252,7 @@ void NetworkManager::publishRawScan(bool complete, uint32_t scan_id) {
       raw.add(nullptr); baseline.add(nullptr); noise.add(nullptr); states.add(nullptr);
     }
   }
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 void NetworkManager::publishBusTrace(const char* direction, uint8_t node,
@@ -273,9 +275,7 @@ void NetworkManager::publishBusTrace(const char* direction, uint8_t node,
   }
   ++trace_window_count_;
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "diagnostic.bus"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = now; JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "diagnostic.bus", now);
   data["direction"] = direction;
   data["node"] = node;
   data["uart_seq"] = sequence;
@@ -291,28 +291,24 @@ void NetworkManager::publishBusTrace(const char* direction, uint8_t node,
     data["dropped"] = trace_dropped_;
     trace_dropped_ = 0;
   }
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 void NetworkManager::publishCalibrationProgress(uint8_t node, uint8_t percent) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "calibration.progress"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "calibration.progress", millis());
   data["node"] = node; data["phase"] = "sampling"; data["percent"] = percent;
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 void NetworkManager::publishCalibrationResult(uint8_t node, bool ok, const char* reason) {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "calibration.result"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "calibration.result", millis());
   data["node"] = node; data["ok"] = ok;
   if (reason) data["reason"] = reason;
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 bool NetworkManager::logAllowed(const char* component, const char* level,
@@ -352,24 +348,20 @@ void NetworkManager::publishLog(const char* level, const char* component,
     return;
   }
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "diagnostic.log"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = now; JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "diagnostic.log", now);
   data["level"] = level; data["component"] = component; data["message"] = message;
   if (node < arcade::kQuadrantCount) data["node"] = node;
   if (log_suppressed_) {
     data["suppressed"] = log_suppressed_;
     log_suppressed_ = 0;
   }
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
 void NetworkManager::publishSnapshot() {
   if (!welcomed_) { ++events_dropped_offline_; return; }
   JsonDocument doc;
-  doc["v"] = 1; doc["type"] = "board.snapshot"; doc["device_id"] = config_->device_id;
-  doc["boot_id"] = String(boot_id_, HEX); doc["seq"] = ++event_sequence_;
-  doc["at_ms"] = millis(); JsonObject data = doc["data"].to<JsonObject>();
+  JsonObject data = beginEvent(doc, "board.snapshot", millis());
   JsonArray squares = data["squares"].to<JsonArray>();
   JsonArray valid = data["valid"].to<JsonArray>();
   JsonArray nodes = data["nodes"].to<JsonArray>();
@@ -389,10 +381,12 @@ void NetworkManager::publishSnapshot() {
                 state == arcade::SensorState::kNegative ? -1 : 0);
     valid.add(q.online && state != arcade::SensorState::kUncertain);
   }
-  String json; serializeJson(doc, json); sendJson(json);
+  sendJson(doc);
 }
 
-void NetworkManager::sendJson(String& json) {
+void NetworkManager::sendJson(JsonDocument& doc) {
+  String json;
+  serializeJson(doc, json);
   if (!websocket_.sendTXT(json) && ws_send_failed_ != UINT32_MAX) ++ws_send_failed_;
   if (runtime_mode_ == arcade::RuntimeMode::kBringup)
     Serial.printf("[%10lu][D][WS>] type-bytes=%u\n", millis(), json.length());

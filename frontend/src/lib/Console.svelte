@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { ws } from './ws.svelte';
-	import { messageTypeLabel, nodeHealth, type DeviceState, type Envelope } from './types';
+	import {
+		messageTypeLabel,
+		nodeHealth,
+		NODE_COUNT,
+		type DeviceState,
+		type Envelope
+	} from './types';
 
 	let { device }: { device: DeviceState | null } = $props();
 	let view = $state<'events' | 'bus'>('events');
@@ -43,9 +49,9 @@
 			<span class="arrow">›</span>
 			<span
 				class="seg"
-				class:ok={nodesOnline === 4}
-				class:warn={nodesOnline > 0 && nodesOnline < 4}
-				class:bad={nodesOnline === 0}>{nodesOnline}/4</span
+				class:ok={nodesOnline === NODE_COUNT}
+				class:warn={nodesOnline > 0 && nodesOnline < NODE_COUNT}
+				class:bad={nodesOnline === 0}>{nodesOnline}/{NODE_COUNT}</span
 			>
 		</span>
 		{#if device}
