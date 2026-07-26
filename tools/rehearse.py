@@ -615,13 +615,16 @@ class Rehearsal:
         # Detection modes are the on-stage escape hatch.
         await self.rebuild(board)
         await game("set_detect", mode="suggest")
-        # A quiet move: a capture could be genuinely ambiguous, and then the
-        # prompt on screen is the ambiguity rather than the suggestion — right
-        # behaviour, wrong thing to be measuring here.
+        # A quiet move onto a square the board can actually see. A capture may
+        # be genuinely ambiguous and a masked destination cannot confirm an
+        # arrival at all; in both cases the prompt on screen is that, rather
+        # than the suggestion — right behaviour, wrong thing to measure here.
+        masked = set(self.state["detect"]["masked"])
         legal = [
             m
             for m in self.state.get("legal_moves", [])
             if board.state[square_index(m[2:4])] == "empty"
+            and square_index(m[2:4]) not in masked
         ]
         if legal:
             uci = legal[0]

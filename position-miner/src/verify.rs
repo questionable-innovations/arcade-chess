@@ -4,16 +4,16 @@
 //! # Why "eval ≈ 0" is not enough
 //!
 //! The obvious way to look for a 50/50 position is to ask an engine for a
-//! score near zero. On an eight-piece board that filter fails badly: run it
-//! and essentially everything it returns is a **dead draw**. Stockfish will
+//! score near zero. On a simplified board that filter fails badly: run it and
+//! essentially everything it returns is a **dead draw**. Stockfish will
 //! happily tell you a level king-and-pawns ending is `0.00` with a
 //! win/draw/loss spread of `1 / 998 / 1`. The human who won that game did so
 //! because their opponent blundered twenty plies later, not because the
 //! position held any tension.
 //!
 //! WDL cannot rescue the filter either. Stockfish's WDL is derived from its
-//! own eval through a material-scaled logistic curve — at `0.00` with eight
-//! pieces on the board it reports ~99% draw more or less by construction,
+//! own eval through a material-scaled logistic curve — at `0.00` with little
+//! material on the board it reports ~99% draw more or less by construction,
 //! whatever the position actually looks like. Asking it to separate "tense"
 //! from "dead" is asking a question it does not answer.
 //!
@@ -54,11 +54,27 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::format::{Reader, Record, Writer, EVAL_UNSET};
-use crate::position::fen;
+use crate::position::{fen, MaterialFilter};
 
-/// How many root moves to ask for. Eight-piece positions rarely have more
-/// legal moves than this, so in practice we see the whole move list and can
-/// count how many of them lose.
+/// How many root moves to ask for. A simplified position in the size range this
+/// pipeline targets rarely has more legal moves than this, so in practice we see
+/// the whole move list and can count how many of them lose. The range now
+/// reaches sixteen pieces, where a position genuinely can exceed it, so be exact
+/// about what the truncation costs each field:
+///
+/// - `holding_moves` stays **exact**. MultiPV returns the top moves by score and
+///   a holder is within `HOLDING_TOLERANCE_CP` of the best, so every holder is in
+///   the reported set unless there are more than `MULTIPV` of them — which is the
+///   opposite of a position worth keeping. The sharpness measure the pipeline
+///   ranks on is therefore unaffected.
+/// - `losing_moves` is a **lower bound**: the tail that gets cut off is the worst
+///   moves, exactly the ones that would have counted as losing.
+/// - `legal_moves` is **capped**, so it should be read as "48 or more" at the
+///   ceiling, and `--min-legal` is a floor on *reported* moves. Harmless at the
+///   single-digit values used in practice.
+///
+/// Raising this costs engine time on every position in the verify stage and buys
+/// accuracy only in the two fields no gate depends on, so it stays at 48.
 pub const MULTIPV: u32 = 48;
 
 /// A root move this far below the best one counts as "losing" for the
@@ -84,6 +100,9 @@ pub struct VerifyOpts {
     /// Reject positions with fewer root moves than this. In a position with
     /// three legal moves, "only one holds" is arithmetic, not tension.
     pub min_legal: u8,
+    /// What kinds of pieces must be present, so the set does not fill up with
+    /// lookalike king-and-pawn positions.
+    pub material: MaterialFilter,
     /// Drop positions whose draw probability is at least this per-mille.
     /// Defaults to 1000 (off) — WDL is recorded for information, but it is
     /// not a useful discriminator at this material count.
@@ -102,6 +121,7 @@ impl Default for VerifyOpts {
             eval_band_cp: 40,
             max_holding: 2,
             min_legal: 6,
+            material: MaterialFilter::default(),
             max_draw_permille: 1000,
             limit: 0,
         }
@@ -116,6 +136,7 @@ pub struct VerifyStats {
     pub dropped_flat: u64,
     pub dropped_forced: u64,
     pub dropped_drawish: u64,
+    pub dropped_material: u64,
 }
 
 /// The result of one MultiPV search.
@@ -427,6 +448,10 @@ pub fn write_filtered(
         }
         if rec.holding_moves > opts.max_holding {
             stats.dropped_flat += 1;
+            continue;
+        }
+        if !opts.material.accepts(rec.occupied, &rec.pieces) {
+            stats.dropped_material += 1;
             continue;
         }
         let has_wdl = rec.wdl_win + rec.wdl_draw + rec.wdl_loss > 0;

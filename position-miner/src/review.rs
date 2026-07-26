@@ -7,13 +7,18 @@ use serde::Serialize;
 use std::fmt::Write as _;
 
 use crate::format::{Record, Termination, EVAL_UNSET};
-use crate::position::{ascii, fen, piece_count, squares};
+use crate::position::{ascii, fen, material_signature, piece_count, squares};
 
 #[derive(Serialize)]
 pub struct Json<'a> {
     pub id: String,
     pub fen: String,
     pub pieces: u32,
+    /// Both sides' material combined and sorted, e.g. `KKPPPPRR`. The variety
+    /// the material gates exist to force is only visible in aggregate, so it
+    /// wants to be a field you can group a whole deck by rather than something
+    /// re-derived from the FEN each time.
+    pub material: String,
     pub side_to_move: &'a str,
     pub ply: u16,
     pub game_plies: u16,
@@ -53,6 +58,7 @@ pub fn to_json(rec: &Record) -> Json<'static> {
         id: rec.id_str(),
         fen: fen(rec),
         pieces: piece_count(rec),
+        material: material_signature(rec.occupied, &rec.pieces),
         side_to_move: if rec.stm == 0 { "white" } else { "black" },
         ply: rec.ply,
         game_plies: rec.game_plies,
@@ -109,10 +115,11 @@ pub fn text_block(rec: &Record) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{}  {} to move  ·  {} pieces  ·  eval {}",
+        "{}  {} to move  ·  {} pieces ({})  ·  eval {}",
         rec.id_str(),
         if rec.stm == 0 { "white" } else { "black" },
         piece_count(rec),
+        material_signature(rec.occupied, &rec.pieces),
         eval_label(rec)
     );
     out.push_str(&ascii(rec));
@@ -248,7 +255,7 @@ fn card(rec: &Record) -> String {
         r#"<article class="card">
   <div class="board">{cells}</div>
   <div class="meta">
-    <div class="row"><code class="id">{id}</code><span class="tag">{stm} to move</span><span class="tag">eval {eval}</span>{verified}</div>
+    <div class="row"><code class="id">{id}</code><span class="tag">{stm} to move</span><span class="tag mat">{material}</span><span class="tag">eval {eval}</span>{verified}</div>
     {wdl}
     <div class="players">
       <span class="p"><b>{white}</b> {welo}</span>
@@ -264,6 +271,7 @@ fn card(rec: &Record) -> String {
         cells = cells,
         id = escape(&rec.id_str()),
         stm = stm,
+        material = material_signature(rec.occupied, &rec.pieces),
         eval = eval_label(rec),
         verified = verified,
         wdl = wdl,
@@ -362,6 +370,8 @@ h1 { font-size: 1.6rem; margin: 0 0 .35rem; letter-spacing: -0.01em; }
 .wwin { color: #6fd08c; font-weight: 600; }
 .bwin { color: #ff9f8a; font-weight: 600; }
 .tag.sharp { border-color: #d98b4a; color: #d98b4a; }
+/* Monospaced so signatures line up down a column and an odd one stands out. */
+.tag.mat { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
 .sharpv { color: #d98b4a; }
 .fen {
   font-size: .68rem; color: var(--dim); word-break: break-all;

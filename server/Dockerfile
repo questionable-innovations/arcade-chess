@@ -13,9 +13,11 @@ RUN mkdir src \
        target/release/deps/arcade_chess_server* \
        target/release/.fingerprint/arcade-chess-server*
 
-# positions.json is `include_str!`d by the game module, so it has to be here
-# before the real build, not only in the runtime image.
-COPY server/positions.json ./positions.json
+# positions.fallback.json is `include_str!`d by the game module, so it has to be
+# here before the real build, not only in the runtime image. Only the fallback
+# is: keeping the mined deck out of this stage means regenerating it does not
+# invalidate the build cache.
+COPY server/positions.fallback.json ./positions.fallback.json
 COPY server/src ./src
 RUN cargo build --release
 
@@ -27,13 +29,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates stockfish \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/arcade-chess-server /usr/local/bin/arcade-chess-server
-# The puzzle deck, which is also compiled into the binary as the fallback.
-# `position-miner/data/` is gitignored and CapRover builds from git, so a mined
-# deck reaches production by overwriting this committed file:
-#   arcpos dump verified.arcpos --json -n 5000 > server/positions.json
-# (note `-n` defaults to 20). Mounting a volume over /srv/positions.json works
-# too. Either way, a deck that fails to load leaves the embedded one in place
-# and says `positions_embedded` in `degraded`.
+# The mined puzzle deck, committed to git so CapRover's git-based build ships
+# it. Regenerate it from the curated deck (also committed) with:
+#   arcpos dump position-miner/data/curated.arcpos --json -n 100000 \
+#       > server/positions.json
+# `-n` defaults to 20, so it always needs raising past the record count.
+# Mounting a volume over /srv/positions.json overrides it without a rebuild.
+# Either way, a deck that fails to load leaves the eight-position fallback
+# compiled into the binary in place and says `positions_embedded` in `degraded`.
 COPY server/positions.json /srv/positions.json
 EXPOSE 8080
 ENV PORT=8080 \

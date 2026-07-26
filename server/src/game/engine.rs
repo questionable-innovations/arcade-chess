@@ -19,8 +19,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
-/// Per-ply search. Long enough to be right about an eight-piece endgame,
-/// short enough that the bar tracks the game rather than trailing it.
+/// Per-ply search. Long enough to be right about the simplified boards puzzle
+/// mode deals — eight to sixteen pieces — short enough that the bar tracks the
+/// game rather than trailing it. This is the one tunable that genuinely gets
+/// shallower as the decks grow: if the bar starts disagreeing with the final
+/// verdict on the busier positions, raise this before suspecting anything else.
 pub const PLY_MOVETIME_MS: u64 = 400;
 /// The final verdict is the one number the whole game is judged on.
 pub const FINAL_MOVETIME_MS: u64 = 2000;

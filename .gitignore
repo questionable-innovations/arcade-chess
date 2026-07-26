@@ -3,4 +3,8 @@ server/target/
 
 position-miner/target/
 
-position-miner/data/
+# Lichess dumps, engine binaries and intermediate .arcpos files are far too big
+# for git. The curated deck is the exception: 86 KB, and it is what
+# server/positions.json is dumped from, so it belongs next to it in history.
+position-miner/data/*
+!position-miner/data/curated.arcpos

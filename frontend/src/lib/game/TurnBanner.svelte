@@ -53,7 +53,7 @@
 
 <div class="banner" class:black={game.turn === 'black' && game.phase === 'playing'}>
 	<div class="line">
-		<span class="dot" class:white={game.turn === 'white'}></span>
+		{#if showTurn}<span class="dot" class:white={game.turn === 'white'}></span>{/if}
 		<h1>{headline}</h1>
 	</div>
 	{#if subline}<p class="sub">{subline}</p>{/if}

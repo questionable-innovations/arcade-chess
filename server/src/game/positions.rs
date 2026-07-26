@@ -5,17 +5,20 @@
 //! command:
 //!
 //! ```sh
-//! arcpos dump verified.arcpos --json -n 5000 > positions.json
+//! arcpos dump position-miner/data/curated.arcpos --json -n 100000 \
+//!     > server/positions.json
 //! ```
 //!
 //! Note `-n` defaults to 20 (`position-miner/src/main.rs`); without raising it
-//! you silently get a twenty-position file.
+//! past the record count you silently get a twenty-position file.
 //!
-//! Loading never fails fatally. A missing, empty or malformed file falls back to
-//! a handful of hand-checked endgames compiled into the binary, because
-//! `position-miner/data/` is gitignored and CapRover builds from git — the
-//! deployed container has only the fallback unless the curated JSON is committed
-//! or mounted. Game mode must not block on the miner finishing.
+//! Both files are committed — the curated `.arcpos` is un-ignored specifically
+//! so the JSON can be regenerated from a clean clone — because CapRover builds
+//! from git and the deployed container gets whatever is in the tree.
+//!
+//! Loading never fails fatally. A missing, empty or malformed deck falls back to
+//! the eight hand-checked endgames in `positions.fallback.json`, compiled into
+//! the binary. Game mode must not go down with the content pipeline.
 
 use std::collections::VecDeque;
 
@@ -25,13 +28,18 @@ use shakmaty::{CastlingMode, Chess, Position};
 
 use crate::util::random_u64;
 
-/// The same file the Dockerfile ships to `POSITIONS_PATH`, compiled in so that
-/// a missing, empty or malformed deck at runtime is a log line rather than a
-/// dead game mode. Replacing the file on disk with a mined deck overrides it;
-/// deleting it cannot break anything.
-const EMBEDDED: &str = include_str!("../../positions.json");
-/// Pieces a dealt position may have. The miner guarantees this; check anyway.
-const MAX_PIECES: usize = 8;
+/// The hand-checked emergency deck, compiled in so that a missing, empty or
+/// malformed deck at runtime is a log line rather than a dead game mode. It is
+/// deliberately *not* the file the Dockerfile ships to `POSITIONS_PATH`: keeping
+/// the two separate is what lets `Deck::fallback` tell "playing the mined deck"
+/// apart from "the mined deck did not load".
+const EMBEDDED: &str = include_str!("../../positions.fallback.json");
+/// Pieces a dealt position may have. This is the miner's format ceiling
+/// (`position-miner/src/format.rs`, `MAX_PIECES`) — the packed nibble array
+/// cannot describe a larger board, so nothing the miner emits can exceed it.
+/// The miner's own `--max-pieces` sits below this; the check is here to catch a
+/// hand-edited or foreign deck, not to re-impose the miner's taste.
+const MAX_PIECES: usize = 16;
 /// How many recently dealt positions to avoid repeating.
 const RECENT_MEMORY: usize = 8;
 
@@ -52,8 +60,8 @@ pub struct Deck {
     pub source: String,
     pub skipped: usize,
     /// True when what got loaded is the hand-checked fallback rather than a
-    /// mined deck — including when it was read from disk, because the shipped
-    /// file *is* the fallback until someone overwrites it.
+    /// mined deck — including when someone points `POSITIONS_PATH` at a copy of
+    /// it, since the point is to report what is actually being dealt.
     pub fallback: bool,
 }
 
@@ -115,7 +123,7 @@ impl Deck {
 
     /// Whether the deck in play is the hand-checked handful rather than a
     /// mined one. Surfaced as a `degraded` chip: eight positions is enough to
-    /// demo with and not enough to hide that the miner never landed.
+    /// demo with and not enough to hide that the mined deck failed to load.
     pub fn is_fallback(&self) -> bool {
         self.fallback
     }
@@ -236,6 +244,25 @@ mod tests {
         }
     }
 
+    /// The committed mined deck is what production actually deals, and it only
+    /// reaches production through git — so a bad regeneration should fail here
+    /// rather than quietly turn into a `positions_embedded` chip on the night.
+    /// Compiled into the test binary only; the release build reads it from
+    /// `POSITIONS_PATH`.
+    #[test]
+    fn the_shipped_deck_is_playable() {
+        let (positions, skipped) = parse(include_str!("../../positions.json"));
+        assert_eq!(skipped, 0, "every shipped position must validate");
+        assert!(
+            positions.len() > 8,
+            "positions.json holds {} positions — did a dump run without -n?",
+            positions.len()
+        );
+        for record in &positions {
+            validate(&record.fen).unwrap_or_else(|err| panic!("{}: {err}", record.id));
+        }
+    }
+
     #[test]
     fn json_lines_and_arrays_both_load() {
         let lines = "{\"id\":\"a\",\"fen\":\"8/6k1/8/8/8/8/1R4K1/1r6 w - - 0 1\"}\n\
@@ -272,6 +299,30 @@ mod tests {
             Err("too many pieces")
         );
         assert!(validate("not a fen").is_err());
+    }
+
+    /// The miner mines a *range* of board sizes, not a fixed eight, and its
+    /// format tops out at sixteen pieces. Every size it can emit has to survive
+    /// `validate` — a ceiling left behind at eight rejects the whole deck, and
+    /// because that failure is non-fatal by design it surfaces only as a
+    /// `positions_embedded` chip rather than as anything that stops a deploy.
+    #[test]
+    fn the_full_mined_piece_range_validates() {
+        for fen in [
+            "8/6k1/8/8/8/8/1R4K1/1r6 w - - 0 1",                    // 5
+            "7R/2B5/p7/P2K4/8/8/r5k1/7q w - - 0 58",                // 8
+            "4rk2/5pp1/p7/8/8/P1N4P/5PP1/4RK2 w - - 2 30",          // 12
+            "r3k2r/pp3ppp/8/8/8/8/PP3PPP/R3K2R w KQkq - 4 20",      // 16
+        ] {
+            let pos = validate(fen).unwrap_or_else(|err| panic!("{fen}: {err}"));
+            assert!(pos.board().occupied().count() <= MAX_PIECES);
+        }
+        // Seventeen is past the format ceiling, so it cannot have come from the
+        // miner and is not trusted here either.
+        assert_eq!(
+            validate("r3k2r/pp3ppp/8/8/7N/8/PP3PPP/R3K2R w KQkq - 4 20"),
+            Err("too many pieces")
+        );
     }
 
     #[test]

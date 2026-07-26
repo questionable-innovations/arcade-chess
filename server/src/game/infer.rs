@@ -5,7 +5,8 @@
 //!
 //! We are not identifying pieces. **We already know the position.** The server
 //! holds the truth in `shakmaty`, so the job is matching a sensor delta against
-//! a legal move list — ten to thirty entries in an eight-piece endgame. The
+//! a legal move list — a few dozen entries on the simplified boards puzzle
+//! mode deals, which run from about eight pieces up to sixteen. The
 //! board can never tell a rook from a king; piece identity lives exclusively in
 //! the tracked game state.
 //!
@@ -171,6 +172,14 @@ fn agrees(expected: &[bool; SQUARES], obs: &Observation) -> bool {
     (0..SQUARES).all(|sq| !obs.known[sq] || obs.occ[sq].occupied() == expected[sq])
 }
 
+/// Whether the board can actually confirm a piece arrived where a move sends
+/// it. A masked or offline destination cannot: "the piece moved there" and "the
+/// piece is in the player's hand" look identical, and committing on that is how
+/// one dead sensor quietly eats every move played onto it.
+fn arrival_is_visible(m: &Move, obs: &Observation) -> bool {
+    obs.known[usize::from(u8::from(m.to()))]
+}
+
 pub fn infer(pos: &Chess, obs: &Observation, params: &Params) -> Inference {
     let hyps = hypotheses(pos);
     if hyps.is_empty() {
@@ -196,7 +205,7 @@ pub fn infer(pos: &Chess, obs: &Observation, params: &Params) -> Inference {
     let exact: Vec<usize> = hyps
         .iter()
         .enumerate()
-        .filter(|(_, h)| agrees(&h.occ, obs))
+        .filter(|(_, h)| arrival_is_visible(&h.m, obs) && agrees(&h.occ, obs))
         .map(|(i, _)| i)
         .collect();
 
@@ -365,15 +374,24 @@ fn distance(h: &Hypothesis, obs: &Observation, dests: &[u64; SQUARES]) -> (f64, 
 
     score += disagree.len() as f64;
 
-    // A missing piece on `m.to` costs double. Every other square could be a
-    // sensor telling lies, but the destination is the move's own evidence: if
-    // nothing has arrived there and no off-centre read explains it, the move
-    // has not happened yet. Without this, lifting an attacker and its victim
-    // together — the ordinary middle of a capture — scores exactly as well as a
-    // stuck sensor and commits the capture before the piece lands.
+    // No confirmed arrival costs two, however the destination fails to confirm
+    // it. Every other square could be a sensor telling lies, but the
+    // destination is the move's own evidence.
+    //
+    // Symmetric on purpose: a square that reads empty already contributed one
+    // above, so it takes one more, while a masked or offline square contributed
+    // nothing and takes both. Without the first half, lifting an attacker and
+    // its victim together — the ordinary middle of a capture — commits the
+    // capture before the piece lands. Without the second, one masked square
+    // swallows every move played onto it, because "moved there" and "in the
+    // player's hand" become indistinguishable.
     let to = usize::from(u8::from(h.m.to()));
-    if disagree.contains(&(to as u8)) && !obs.occ[to].occupied() {
-        score += 1.0;
+    if offset.is_none() {
+        if !obs.known[to] {
+            score += 2.0;
+        } else if disagree.contains(&(to as u8)) && !obs.occ[to].occupied() {
+            score += 1.0;
+        }
     }
 
     // One polarity term, skipped for promotions (the promoted queen is a
@@ -803,6 +821,28 @@ mod tests {
         // Land the attacker and it commits, with no prompt at all.
         f.set("d5", Occ::Pos);
         assert_eq!(committed(&infer(&pos, &f.view(), &Params::default())), "d2d5");
+    }
+
+    /// A masked or offline destination cannot confirm anything, so a piece
+    /// lifted next to one must not be read as having moved onto it. Otherwise a
+    /// single dead sensor quietly eats every move played its way — and the
+    /// square is masked precisely because it is the one that lies.
+    #[test]
+    fn a_move_onto_an_unreadable_square_is_never_committed() {
+        let pos = position("8/6k1/8/8/8/8/6K1/R7 w - - 0 1");
+        let mut f = Fixture::of(&pos);
+        f.known[sq("b1")] = false;
+        f.lift("a1");
+        match infer(&pos, &f.view(), &Params::default()) {
+            Inference::Mismatch { squares, .. } => {
+                assert_eq!(squares, vec![u8::from(Square::A1)]);
+            }
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+        // With the sensor believed again, the same board commits immediately.
+        f.known[sq("b1")] = true;
+        f.set("b1", Occ::Pos);
+        assert_eq!(committed(&infer(&pos, &f.view(), &Params::default())), "a1b1");
     }
 
     /// Two-handed fiddling, or a physically illegal move: nothing fits, the

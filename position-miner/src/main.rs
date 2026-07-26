@@ -54,9 +54,12 @@ struct MineArgs {
     /// Output ARCPOS1 file.
     #[arg(short, long, default_value = "positions.arcpos")]
     out: PathBuf,
-    /// Exact piece count to mine for, kings included.
-    #[arg(long, default_value_t = 8)]
-    pieces: u32,
+    /// Fewest pieces on the board, kings included.
+    #[arg(long, default_value_t = 10)]
+    min_pieces: u32,
+    /// Most pieces on the board (format ceiling is 16).
+    #[arg(long, default_value_t = 15)]
+    max_pieces: u32,
     /// Keep positions whose lichess eval is within ± this many centipawns.
     #[arg(long, default_value_t = 30)]
     band: i16,
@@ -78,6 +81,17 @@ struct MineArgs {
     /// Require the two sides' non-king material to differ.
     #[arg(long)]
     require_imbalance: bool,
+    /// Minimum number of distinct piece roles on the board, kings included.
+    /// A pure king-and-pawn position has 2; adding a rook makes 3.
+    #[arg(long, default_value_t = 0)]
+    min_roles: u8,
+    /// Require at least one piece from this set of roles, e.g. `nbr` for
+    /// "must contain a knight, bishop or rook". Letters p/n/b/r/q/k.
+    #[arg(long, default_value = "")]
+    require_any: String,
+    /// Cap total pawns across both sides.
+    #[arg(long)]
+    max_pawns: Option<u8>,
     /// Keep at most this many positions from any single game.
     #[arg(long, default_value_t = 1)]
     per_game: usize,
@@ -127,6 +141,15 @@ struct VerifyArgs {
     /// cannot tell a sharp level position from a dead one.
     #[arg(long, default_value_t = 1000)]
     max_draw: u16,
+    /// Minimum number of distinct piece roles on the board, kings included.
+    #[arg(long, default_value_t = 0)]
+    min_roles: u8,
+    /// Require at least one piece from this set of roles, e.g. `nbr`.
+    #[arg(long, default_value = "")]
+    require_any: String,
+    /// Cap total pawns across both sides.
+    #[arg(long)]
+    max_pawns: Option<u8>,
     /// Verify at most this many records (0 = all).
     #[arg(long, default_value_t = 0)]
     limit: u64,
@@ -147,6 +170,17 @@ struct FilterArgs {
     /// Reject positions with fewer legal root moves than this.
     #[arg(long, default_value_t = 6)]
     min_legal: u8,
+    /// Minimum number of distinct piece roles on the board, kings included.
+    /// A pure king-and-pawn position has 2; adding a rook makes 3.
+    #[arg(long, default_value_t = 0)]
+    min_roles: u8,
+    /// Require at least one piece from this set of roles, e.g. `nbr` for
+    /// "must contain a knight, bishop or rook". Letters p/n/b/r/q/k.
+    #[arg(long, default_value = "")]
+    require_any: String,
+    /// Cap total pawns across both sides.
+    #[arg(long)]
+    max_pawns: Option<u8>,
     /// Drop positions whose draw probability exceeds this per-mille.
     #[arg(long, default_value_t = 1000)]
     max_draw: u16,
@@ -193,6 +227,44 @@ struct ReviewArgs {
     notes: Vec<String>,
 }
 
+/// Builds the material gate from CLI strings, reporting a bad role letter
+/// rather than silently ignoring it.
+fn material_filter(
+    min_roles: u8,
+    require_any: &str,
+    max_pawns: Option<u8>,
+) -> Result<position::MaterialFilter> {
+    let require_any = position::parse_roles(require_any)
+        .map_err(|c| anyhow::anyhow!("unknown piece role {c:?}; use letters from pnbrqk"))?;
+    Ok(position::MaterialFilter {
+        min_roles,
+        require_any,
+        max_pawns,
+    })
+}
+
+/// The material gate as a trailing annotation on its own reject count, empty
+/// when no gate is set. A bare count cannot distinguish "the gate rejected
+/// nothing" from "there was no gate", and these flags are easy to typo into
+/// silence — spelling the gate back out is how a run's output stays readable
+/// weeks later, next to the number it produced.
+fn material_note(f: &position::MaterialFilter) -> String {
+    if f.is_noop() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    if f.min_roles > 0 {
+        parts.push(format!("{}+ distinct roles", f.min_roles));
+    }
+    if f.require_any != 0 {
+        parts.push(format!("one of {}", position::roles_to_string(f.require_any)));
+    }
+    if let Some(max) = f.max_pawns {
+        parts.push(format!("{max} pawns max"));
+    }
+    format!("  ({})", parts.join(", "))
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -207,7 +279,8 @@ fn main() -> Result<()> {
 
 fn cmd_mine(args: MineArgs) -> Result<()> {
     let filters = mine::Filters {
-        pieces: args.pieces,
+        min_pieces: args.min_pieces,
+        max_pieces: args.max_pieces,
         eval_band_cp: args.band,
         stable_plies: args.stable,
         min_elo: args.min_elo,
@@ -215,6 +288,7 @@ fn cmd_mine(args: MineArgs) -> Result<()> {
         require_normal_termination: !args.allow_time_forfeit,
         allow_draws: args.allow_draws,
         require_imbalance: args.require_imbalance,
+        material: material_filter(args.min_roles, &args.require_any, args.max_pawns)?,
         per_game: args.per_game,
         min_gap_plies: args.min_gap,
         limit: args.limit,
@@ -226,10 +300,18 @@ fn cmd_mine(args: MineArgs) -> Result<()> {
     println!("games passing headers     {}", stats.games_scanned);
     println!("  of those, with evals    {}", stats.games_with_eval);
     println!("  without any eval        {}", stats.rejected_no_eval);
-    println!("{}-piece positions scored  {}", args.pieces, stats.positions_at_size);
+    println!(
+        "{}-{}-piece positions      {}",
+        args.min_pieces, args.max_pieces, stats.positions_at_size
+    );
     println!("  outside eval band       {}", stats.rejected_band);
     println!("  in band but unstable    {}", stats.rejected_unstable);
     println!("  symmetric material      {}", stats.rejected_symmetric);
+    println!(
+        "  material gate           {}{}",
+        stats.rejected_material,
+        material_note(&filters.material)
+    );
     println!("candidates after board    {}", stats.candidates);
     println!("  game ended too soon     {}", stats.rejected_tail);
     println!("  same game, already kept {}", stats.rejected_same_game);
@@ -249,11 +331,12 @@ fn cmd_verify(args: VerifyArgs) -> Result<()> {
         eval_band_cp: args.band,
         max_holding: args.max_holding,
         min_legal: args.min_legal,
+        material: material_filter(args.min_roles, &args.require_any, args.max_pawns)?,
         max_draw_permille: args.max_draw,
         limit: args.limit,
     };
     let stats = verify::run(&args.input, &args.out, &opts, true)?;
-    print_verify_stats(&stats);
+    print_verify_stats(&stats, &opts);
     println!("\n-> {}", args.out.display());
     Ok(())
 }
@@ -263,21 +346,27 @@ fn cmd_filter(args: FilterArgs) -> Result<()> {
         eval_band_cp: args.band,
         max_holding: args.max_holding,
         min_legal: args.min_legal,
+        material: material_filter(args.min_roles, &args.require_any, args.max_pawns)?,
         max_draw_permille: args.max_draw,
         ..verify::VerifyOpts::default()
     };
     let stats = verify::filter(&args.input, &args.out, &opts)?;
-    print_verify_stats(&stats);
+    print_verify_stats(&stats, &opts);
     println!("\n-> {}", args.out.display());
     Ok(())
 }
 
-fn print_verify_stats(stats: &verify::VerifyStats) {
+fn print_verify_stats(stats: &verify::VerifyStats, opts: &verify::VerifyOpts) {
     println!("scored              {}", stats.scored);
     println!("  outside band      {}", stats.dropped_band);
     println!("  too few moves     {}", stats.dropped_forced);
     println!("  flat (not sharp)  {}", stats.dropped_flat);
     println!("  too drawish       {}", stats.dropped_drawish);
+    println!(
+        "  material gate     {}{}",
+        stats.dropped_material,
+        material_note(&opts.material)
+    );
     println!("kept                {}", stats.kept);
 }
 

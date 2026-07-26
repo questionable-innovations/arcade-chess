@@ -137,9 +137,6 @@
 		color: var(--color-fg-dim);
 	}
 	.tab {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
 		border: 0;
 		background: transparent;
 		padding: 2px 4px;

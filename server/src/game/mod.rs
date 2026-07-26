@@ -974,7 +974,6 @@ impl Game {
             margin: self.tun.tier3_margin,
         };
         let inference = infer::infer(&self.pos, &observation, &params);
-        tracing::warn!(?inference, nudge = ?self.nudge, phase = ?self.phase, observed = %self.obs.observed_string(), "DBGSETTLE");
 
         match inference {
             Inference::NoChange => {

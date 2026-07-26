@@ -1,8 +1,12 @@
 # position-miner (`arcpos`)
 
-Mines **balanced but decisive** endgame positions out of the public
+Mines **balanced but decisive** positions out of the public
 [lichess database](https://database.lichess.org/) dumps, so the board has a
 library of positions that are genuinely 50/50 and genuinely playable out.
+
+Targets simplified-but-not-bare boards — 10 to 15 pieces by default — with
+material variety enforced, because the naive filters collapse onto a monoculture
+of king-and-pawn endings (see below).
 
 ```
 lichess .pgn.zst ─► arcpos mine ─► .arcpos ──► arcpos verify ─► .arcpos ─► arcpos filter ─► .arcpos
@@ -60,7 +64,10 @@ It keeps a position when all of the following hold:
 
 | gate | default | why |
 | --- | --- | --- |
-| exactly N pieces on the board | `--pieces 8` | the target endgame size |
+| piece count in range | `--min-pieces 10 --max-pieces 15` | the target board size |
+| distinct piece roles | `--min-roles` (off) | 2 means king-and-pawns only; 3+ forces something else |
+| a real piece present | `--require-any` (off) | pass `nbr` to demand a knight, bishop or rook |
+| pawn cap | `--max-pawns` (off) | trims the pawn-heavy lookalikes |
 | lichess `[%eval]` within ±band | `--band 30` | cheap "is it level" pre-filter |
 | in-band for consecutive plies | `--stable 2` | rejects momentary crossings mid-tactic |
 | game was **won**, not drawn | `--allow-draws` off | a draw says nothing about winning chances |
@@ -133,16 +140,45 @@ arcpos review data/curated.arcpos -o review.html -n 48
 players, the eval and sharpness profile, and a deep link back to the ply in
 the original lichess game.
 
+## Material variety
+
+Left alone, "level and sharp" produces a monoculture. In an 8-piece run over
+2019-09, of 740 curated positions **185 were pure king-and-pawns and 186 were
+kings-pawns-rooks** — half the set in two shapes — and 27% contained no knight,
+bishop or rook at all.
+
+That is not a bug in the sharpness metric; it is what the source data looks
+like. Games reach a level simplified position *by trading everything off*, and
+what survives the trades is pawns, rooks and kings. So variety has to be
+demanded explicitly:
+
+```sh
+# at least one knight/bishop/rook, and at least 3 distinct roles on the board
+arcpos mine … --require-any nbr --min-roles 3
+arcpos filter data/scored.arcpos -o data/curated.arcpos --require-any nbr
+```
+
+`--require-any` takes role letters `p n b r q k`. Note a queen does *not*
+satisfy `nbr` — the point is to demand a piece that is neither a pawn nor a
+queen, since queens are already common in level positions.
+
+Both gates exist on `mine` (cheap, skips the engine entirely) and on
+`filter`/`verify` (retune an already-scored file).
+
 ## The `.arcpos` file
 
-A 32-byte header followed by fixed-size 116-byte records. Every record is
+A 32-byte header followed by fixed-size 124-byte records. Every record is
 self-contained: the packed board, side to move, castling and en-passant state,
 both usernames and ratings, the time control, the UTC timestamp, who won, the
 lichess game id and ply, and both engine passes. Fixed-size records mean record
-`n` is at `32 + n*116`, so the file is `mmap`-able and binary-searchable on
+`n` is at `32 + n*124`, so the file is `mmap`-able and binary-searchable on
 `id` once sorted.
 
-The record `id` is FNV-1a over the 15 packed position bytes — board, side to
+The board is packed as an occupancy bitboard plus one nibble per occupied
+square, which caps a position at **16 pieces** — that ceiling is what bounds
+`--max-pieces`.
+
+The record `id` is FNV-1a over the 19 packed position bytes — board, side to
 move, castling, en-passant — and nothing else. Clocks and move numbers are
 excluded, so the same position reached by two different games collapses onto
 one id. Rendered for humans as 13 characters of Crockford base32.

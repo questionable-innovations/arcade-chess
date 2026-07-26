@@ -3,6 +3,11 @@ frontend/node_modules
 frontend/.svelte-kit
 frontend/build
 server/target
+position-miner/target
+# Only the miner's *output* matters to the image, and that is already dumped
+# into server/positions.json. data/ holds the multi-GB lichess dumps, a vendored
+# Stockfish, and a symlink to whatever drive the mining ran on.
+position-miner/data
 firmware-*/.pio
 docs/*.pdf
 .DS_Store

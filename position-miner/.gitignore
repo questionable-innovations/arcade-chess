@@ -1,2 +1,5 @@
-data/
+# `data/*` rather than `data/`: git cannot re-include a file inside an excluded
+# directory, and the curated deck below has to stay tracked.
+data/*
+!data/curated.arcpos
 target/

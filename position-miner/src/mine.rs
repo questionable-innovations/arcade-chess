@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::format::{
     game_id_field, name_field, Record, Termination, Writer, MATE_BASE, REC_FLAG_MATE,
 };
-use crate::position::{pack_position, position_id, Packed};
+use crate::position::{pack_position, position_id, MaterialFilter, Packed};
 
 /// Everything that decides whether a position is worth storing.
 ///
@@ -29,8 +29,11 @@ use crate::position::{pack_position, position_id, Packed};
 /// is the signal we are mining for.
 #[derive(Debug, Clone)]
 pub struct Filters {
-    /// Exact number of pieces on the board, kings included.
-    pub pieces: u32,
+    /// Fewest pieces on the board, kings included.
+    pub min_pieces: u32,
+    /// Most pieces on the board. Capped by `format::MAX_PIECES`, which is all
+    /// the packed nibble array can describe.
+    pub max_pieces: u32,
     /// Keep positions whose lichess eval is within ±this many centipawns.
     pub eval_band_cp: i16,
     /// How many consecutive plies (ending at this one) must sit inside the
@@ -50,6 +53,10 @@ pub struct Filters {
     /// (R vs B+P and friends). Symmetric material is where the dead draws
     /// concentrate.
     pub require_imbalance: bool,
+    /// What kinds of pieces must be present. Without this the results are
+    /// dominated by king-and-pawn and king-pawn-rook positions, which are the
+    /// most common way a game arrives at a level simplified position.
+    pub material: MaterialFilter,
     /// Keep at most this many positions from any one game. A long balanced
     /// ending offers a dozen near-identical consecutive plies; without a cap
     /// a handful of games would swamp the file.
@@ -64,7 +71,8 @@ pub struct Filters {
 impl Default for Filters {
     fn default() -> Self {
         Filters {
-            pieces: 8,
+            min_pieces: 10,
+            max_pieces: 15,
             eval_band_cp: 30,
             stable_plies: 2,
             min_elo: 1800,
@@ -72,6 +80,7 @@ impl Default for Filters {
             require_normal_termination: true,
             allow_draws: false,
             require_imbalance: false,
+            material: MaterialFilter::default(),
             per_game: 1,
             min_gap_plies: 8,
             limit: 0,
@@ -96,6 +105,7 @@ pub struct Stats {
     pub rejected_unstable: u64,
     pub rejected_tail: u64,
     pub rejected_symmetric: u64,
+    pub rejected_material: u64,
     pub rejected_same_game: u64,
 }
 
@@ -332,6 +342,10 @@ impl<'a> MineVisitor<'a> {
         }
         if self.filters.require_imbalance && is_symmetric(&packed) {
             self.stats.rejected_symmetric += 1;
+            return;
+        }
+        if !self.filters.material.accepts(packed.occupied, &packed.pieces) {
+            self.stats.rejected_material += 1;
             return;
         }
 
@@ -573,8 +587,10 @@ impl Visitor for MineVisitor<'_> {
         self.pos.play_unchecked(&mv);
         self.ply += 1;
 
-        let packed = pack_position(&self.pos)
-            .filter(|p| p.occupied.count_ones() == self.filters.pieces);
+        let packed = pack_position(&self.pos).filter(|p| {
+            let n = p.occupied.count_ones();
+            n >= self.filters.min_pieces && n <= self.filters.max_pieces
+        });
 
         self.awaiting_eval = Some(PendingPosition {
             packed,
@@ -754,7 +770,7 @@ mod tests {
         Candidate {
             packed: Packed {
                 occupied: 0,
-                pieces: [0; 4],
+                pieces: [0; 8],
                 stm: 0,
                 castling: 0,
                 ep_square: 255,
@@ -804,7 +820,7 @@ mod tests {
         // Kings + one rook each: symmetric.
         let sym = Packed {
             occupied: 0b1111,
-            pieces: [0x46, 0xac, 0, 0], // WR, WK, BR, BK
+            pieces: [0x46, 0xac, 0, 0, 0, 0, 0, 0], // WR, WK, BR, BK
             stm: 0,
             castling: 0,
             ep_square: 255,
@@ -814,7 +830,7 @@ mod tests {
         // Kings + white rook vs black bishop: not symmetric.
         let asym = Packed {
             occupied: 0b1111,
-            pieces: [0x46, 0xc9, 0, 0], // WR, WK, BB, BK
+            pieces: [0x46, 0xc9, 0, 0, 0, 0, 0, 0], // WR, WK, BB, BK
             stm: 0,
             castling: 0,
             ep_square: 255,
