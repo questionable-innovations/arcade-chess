@@ -109,12 +109,19 @@ pub struct Observer {
     /// Operator- or auto-masked squares, excluded from every comparison.
     pub masked: [bool; SQUARES],
     pub node_online: [bool; NODES],
+    /// Quadrants that came back since the last drain. A node that dropped and
+    /// returned has rebooted and forgotten every override it was holding, so the
+    /// painter's belief about it has to be torn up rather than trusted.
+    pub rejoined: [bool; NODES],
     /// Squares seen momentarily empty or wobbling since the last commit. This is
     /// the evidence that names which piece was lifted in an ambiguous capture.
     pub journal: [bool; SQUARES],
     /// Clockwise quarter turns between the physical board and the game.
     pub rotation: u8,
-    /// Wall-clock of the last change to occupancy or wobble on a known square.
+    /// Monotonic ms of the last change to occupancy or wobble on a known square.
+    /// Masked and offline squares deliberately do not touch this: a square the
+    /// operator has already disowned must not be able to hold the settle window
+    /// open forever, which is the whole point of being able to mask it.
     pub last_change_ms: u64,
     /// Wall-clock of the last device event of any kind, for staleness.
     pub last_event_ms: u64,
@@ -134,6 +141,7 @@ impl Observer {
             wobble: [false; SQUARES],
             masked: [false; SQUARES],
             node_online: [false; NODES],
+            rejoined: [false; NODES],
             journal: [false; SQUARES],
             rotation: 0,
             last_change_ms: 0,
@@ -261,6 +269,11 @@ impl Observer {
         } else {
             online = [true; NODES];
         }
+        for (node, &up) in online.iter().enumerate() {
+            if up && !self.node_online[node] {
+                self.rejoined[node] = true;
+            }
+        }
         self.node_online = online;
 
         let Some(squares) = squares else { return };
@@ -271,6 +284,9 @@ impl Observer {
             if !self.node_online[node] {
                 continue;
             }
+            // Masked squares are still tracked so that unmasking is instant and
+            // `observed` stays truthful — they just never move the settle clock.
+            let known = self.known(game_sq);
             let raw = squares.get(device_sq).and_then(Value::as_i64).unwrap_or(0);
             let is_valid = valid
                 .and_then(|v| v.get(device_sq))
@@ -282,9 +298,11 @@ impl Observer {
                 // an offline quadrant. Keep the occupancy, flag the instability.
                 if !self.wobble[game_sq] {
                     self.wobble[game_sq] = true;
-                    changed = true;
+                    changed |= known;
                 }
-                self.journal[game_sq] = true;
+                if known {
+                    self.journal[game_sq] = true;
+                }
                 continue;
             }
             let next = match raw {
@@ -292,11 +310,15 @@ impl Observer {
                 -1 => Occ::Neg,
                 _ => Occ::Empty,
             };
-            if !next.occupied() {
+            // Journal *transitions* to empty, not every square that reads empty.
+            // A snapshot reports all 64 squares, so the un-narrowed version
+            // flooded ~56 entries that were never lifts and handed Tier 2 a
+            // discriminator built almost entirely out of noise.
+            if known && self.occ[game_sq].occupied() && !next.occupied() {
                 self.journal[game_sq] = true;
             }
             if self.occ[game_sq] != next || self.wobble[game_sq] {
-                changed = true;
+                changed |= known;
             }
             self.occ[game_sq] = next;
             self.wobble[game_sq] = false;
@@ -320,6 +342,7 @@ impl Observer {
         }
         let game_sq = self.to_game(device_sq as u8) as usize;
         let state = data.get("state").and_then(Value::as_str).unwrap_or("");
+        let known = self.known(game_sq);
         let before = (self.occ[game_sq], self.wobble[game_sq]);
         match state {
             "positive" => {
@@ -333,18 +356,22 @@ impl Observer {
             "empty" => {
                 self.occ[game_sq] = Occ::Empty;
                 self.wobble[game_sq] = false;
-                self.journal[game_sq] = true;
+                if known {
+                    self.journal[game_sq] = true;
+                }
             }
             // Only ever reachable from an occupied state (`sensors.cpp:146`), so
             // this is a piece on its way off the square: journal it and hold the
             // last occupancy until the square resolves.
             "uncertain" => {
                 self.wobble[game_sq] = true;
-                self.journal[game_sq] = true;
+                if known {
+                    self.journal[game_sq] = true;
+                }
             }
             _ => return,
         }
-        if before != (self.occ[game_sq], self.wobble[game_sq]) {
+        if known && before != (self.occ[game_sq], self.wobble[game_sq]) {
             self.last_change_ms = now_ms;
         }
     }
@@ -365,8 +392,20 @@ impl Observer {
             .unwrap_or(false);
         if self.node_online[node as usize] != online {
             self.node_online[node as usize] = online;
+            if online {
+                self.rejoined[node as usize] = true;
+            }
             self.last_change_ms = now_ms;
         }
+    }
+
+    /// Drains the offline→online transitions. The painter uses this to drop the
+    /// latches it holds for a quadrant that has since rebooted and forgotten
+    /// everything it was told.
+    pub fn take_rejoined(&mut self) -> Vec<usize> {
+        let out: Vec<usize> = (0..NODES).filter(|&n| self.rejoined[n]).collect();
+        self.rejoined = [false; NODES];
+        out
     }
 
     pub fn offline_nodes(&self) -> Vec<usize> {
@@ -440,6 +479,79 @@ mod tests {
         obs.apply_sensor_changed(&json!({ "square": 27, "state": "positive" }), 2_000);
         assert!(!obs.settled(2_300, 700));
         assert!(obs.settled(2_800, 700));
+    }
+
+    /// The documented one-click remedy for a lying sensor has to actually work:
+    /// a masked square that flaps faster than the settle window must not be able
+    /// to hold detection open forever.
+    #[test]
+    fn a_masked_square_cannot_hold_the_settle_window_open() {
+        let mut obs = Observer::new();
+        obs.apply_snapshot(&snapshot(vec![0; 64], vec![true; 64], 0b1111), 1_000);
+        obs.masked[27] = true;
+
+        let mut now = 2_000;
+        for _ in 0..10 {
+            obs.apply_sensor_changed(&json!({ "square": 27, "state": "positive" }), now);
+            now += 100;
+            obs.apply_sensor_changed(&json!({ "square": 27, "state": "empty" }), now);
+            now += 100;
+        }
+        assert!(
+            obs.settled(now, 700),
+            "a masked square must neither move the clock nor wobble the window"
+        );
+
+        // Unmasked, the very same flapping does hold it open.
+        obs.masked[27] = false;
+        obs.apply_sensor_changed(&json!({ "square": 27, "state": "positive" }), now);
+        assert!(!obs.settled(now + 100, 700));
+    }
+
+    /// An offline quadrant's squares are unknown, so they cannot stall the rest
+    /// of the board either.
+    #[test]
+    fn an_offline_quadrant_cannot_hold_the_settle_window_open() {
+        let mut obs = Observer::new();
+        obs.apply_snapshot(&snapshot(vec![0; 64], vec![true; 64], 0b1111), 1_000);
+        // Node 3 (h8 corner) drops, then its squares report nonsense.
+        obs.apply_node_status(&json!({ "node": 3, "online": false }), 1_100);
+        obs.apply_sensor_changed(&json!({ "square": 63, "state": "positive" }), 2_000);
+        assert!(obs.settled(2_100, 700), "an offline square says nothing at all");
+    }
+
+    /// Tier 2 leans on the journal to name which piece was lifted, so it has to
+    /// mean "seen to leave", not "read as empty in the last full snapshot".
+    #[test]
+    fn the_journal_records_transitions_not_every_empty_square() {
+        let mut obs = Observer::new();
+        let mut squares = vec![0i64; 64];
+        squares[12] = 1;
+        squares[28] = 1;
+        obs.apply_snapshot(&snapshot(squares.clone(), vec![true; 64], 0b1111), 1_000);
+        assert!(
+            !obs.journal.iter().any(|&j| j),
+            "a first snapshot is a baseline, not 62 lifts"
+        );
+
+        // 12 empties out; 28 stays put. Only 12 is evidence.
+        squares[12] = 0;
+        obs.apply_snapshot(&snapshot(squares, vec![true; 64], 0b1111), 2_000);
+        assert!(obs.journal[12], "the square that emptied is journalled");
+        assert!(!obs.journal[28], "the square that did not move is not");
+        assert_eq!(obs.journal.iter().filter(|&&j| j).count(), 1);
+    }
+
+    #[test]
+    fn a_quadrant_coming_back_is_reported_once() {
+        let mut obs = Observer::new();
+        obs.apply_snapshot(&snapshot(vec![0; 64], vec![true; 64], 0b1111), 1_000);
+        assert_eq!(obs.take_rejoined(), vec![0, 1, 2, 3], "first sight counts");
+        obs.apply_node_status(&json!({ "node": 2, "online": false }), 1_100);
+        assert!(obs.take_rejoined().is_empty());
+        obs.apply_node_status(&json!({ "node": 2, "online": true }), 1_200);
+        assert_eq!(obs.take_rejoined(), vec![2]);
+        assert!(obs.take_rejoined().is_empty(), "draining clears it");
     }
 
     #[test]

@@ -171,7 +171,8 @@
 	.nrow {
 		display: flex;
 		align-items: center;
-		gap: 9px;
+		flex-wrap: wrap;
+		gap: 6px 9px;
 	}
 	.nstats {
 		display: flex;

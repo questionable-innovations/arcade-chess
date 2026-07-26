@@ -26,6 +26,7 @@
 //! occupancy changes with every sensor event, and a full snapshot per event is
 //! what trips the existing `shed_lagged` path and starts dropping viewers.
 
+pub mod config;
 pub mod engine;
 pub mod infer;
 pub mod observe;
@@ -42,7 +43,6 @@ use shakmaty::{Chess, Color, Move, Position};
 use tokio::sync::mpsc;
 
 use crate::state::{command_envelope, AppState, DeviceLookup};
-use crate::util::now_ms;
 
 use engine::{EvalResult, EvalSource};
 use infer::{Confidence, Inference, Offset};
@@ -119,40 +119,7 @@ impl DetectMode {
     }
 }
 
-/// Everything worth changing from a phone at the venue. Being able to nudge
-/// these without a redeploy is the highest-value risk mitigation in the build.
-#[derive(Clone, Copy, Debug)]
-pub struct Tunables {
-    pub settle_ms: u64,
-    pub autostart_stable_ms: u64,
-    pub unknown_tolerance: usize,
-    pub tier3_max_distance: f64,
-    pub tier3_margin: f64,
-    pub draw_band_cp: i32,
-    pub countdown_ms: u64,
-}
-
-impl Default for Tunables {
-    fn default() -> Self {
-        Tunables {
-            settle_ms: env_u64("SETTLE_MS", 700),
-            autostart_stable_ms: env_u64("AUTOSTART_STABLE_MS", 1500),
-            unknown_tolerance: env_u64("UNKNOWN_TOLERANCE", 0) as usize,
-            tier3_max_distance: env_f64("TIER3_MAX_DISTANCE", 1.0),
-            tier3_margin: env_f64("TIER3_MARGIN", 1.0),
-            draw_band_cp: env_u64("DRAW_BAND_CP", 40) as i32,
-            countdown_ms: env_u64("COUNTDOWN_MS", 3000),
-        }
-    }
-}
-
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
-fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
+pub use config::{Palette, Rules, Tunables};
 
 #[derive(Clone, Debug)]
 struct MoveRecord {
@@ -189,7 +156,11 @@ impl Default for EvalView {
             mate: None,
             win_prob: 0.5,
             depth: 0,
-            source: EvalSource::Material,
+            // Deliberately `Unknown`, not `Material`: nothing has been counted
+            // yet. Claiming a source before a number exists puts a "MATERIAL"
+            // badge next to a 0.00 that was never computed, which is exactly the
+            // dishonesty the labelling exists to prevent.
+            source: EvalSource::Unknown,
             status: "pending",
         }
     }
@@ -219,10 +190,13 @@ pub struct Game {
     position: Option<PositionRecord>,
     start_fen: String,
     start_cp: i32,
+    /// Which engine produced `start_cp`. The verdict is a subtraction, so a
+    /// material baseline against a Stockfish final is two different scales
+    /// masquerading as one number — and it decides who the demo says won.
+    start_source: EvalSource,
     pos: Chess,
     moves: Vec<MoveRecord>,
     history: Vec<Ply>,
-    max_ply: usize,
 
     obs: Observer,
     pol_tag: [Option<Pol>; SQUARES],
@@ -230,6 +204,13 @@ pub struct Game {
 
     detect_mode: DetectMode,
     tun: Tunables,
+    rules: Rules,
+    palette: Palette,
+    /// Which of the four board edges show the eval bar, and which the turn
+    /// indicator. Both values are already on screen, but the edge the audience
+    /// happens to face is the one that has to carry the eval bar.
+    eval_sides: Vec<u8>,
+    turn_sides: Vec<u8>,
 
     choice: Option<Choice>,
     eval: EvalView,
@@ -248,11 +229,37 @@ pub struct Game {
     autopilot: Option<Autopilot>,
     recent_commands: VecDeque<(String, &'static str)>,
     dirty: bool,
-    last_persisted_phase: Option<Phase>,
+    /// The game snapshot is keyed on `(phase, game_seq)` rather than phase
+    /// alone: a clean auto-detected run stays in `Playing` for every ply, so a
+    /// phase-only key wrote once and then went stale for the whole game.
+    last_persisted: Option<(Phase, u64)>,
+    /// Set by any action that changes calibration, so the venue profile is
+    /// written without doing a file write per sensor event.
+    config_dirty: bool,
+
+    /// Where the game snapshot and the venue profile are written. Resolved
+    /// once at construction rather than read from the environment per call, so
+    /// they are injectable in tests and cannot change under a running game.
+    snapshot_path: String,
+    config_path: String,
+
+    /// Monotonic milliseconds since the task started. Wall clock is wrong for
+    /// every one of these deadlines — an NTP step backwards silently freezes the
+    /// settle window, and a step forwards fires everything at once.
+    epoch: tokio::time::Instant,
+    /// The delta stream tore; nothing may be committed off the torn view until a
+    /// fresh snapshot has healed it.
+    gap_until_ms: Option<u64>,
 }
 
 pub enum GameInput {
-    Device { device_id: String, event: Value },
+    Device {
+        device_id: String,
+        event: Value,
+        /// The device event stream had a sequence gap or the board rebooted, so
+        /// the observer's deltas no longer describe a real board.
+        gap: bool,
+    },
     Client { action: Value, is_admin: bool, reply: mpsc::Sender<String> },
     Eval(EvalResult),
 }
@@ -293,6 +300,9 @@ pub fn spawn(state: Arc<AppState>) -> GameHandle {
 }
 
 async fn run(mut game: Game, mut rx: mpsc::UnboundedReceiver<GameInput>) {
+    // Calibration first, so a restored game lands into a *calibrated* observer
+    // rather than one with rotation 0 and no masks.
+    game.restore_config();
     game.restore();
     game.publish();
     let mut ticker = tokio::time::interval(TICK);
@@ -322,15 +332,19 @@ impl Game {
             position: None,
             start_fen: start.to_string(),
             start_cp: 0,
+            start_source: EvalSource::Material,
             pos: Chess::default(),
             moves: Vec::new(),
             history: Vec::new(),
-            max_ply: env_u64("MAX_PLY", 10) as usize,
             obs: Observer::new(),
             pol_tag: [None; SQUARES],
             painter: Painter::new(),
             detect_mode: DetectMode::Auto,
             tun: Tunables::default(),
+            rules: Rules::default(),
+            palette: Palette::default(),
+            eval_sides: vec![0, 2],
+            turn_sides: vec![1, 3],
             choice: None,
             eval: EvalView::default(),
             result: None,
@@ -345,15 +359,30 @@ impl Game {
             autopilot: None,
             recent_commands: VecDeque::new(),
             dirty: true,
-            last_persisted_phase: None,
+            last_persisted: None,
+            config_dirty: false,
+            snapshot_path: std::env::var("GAME_SNAPSHOT_PATH")
+                .unwrap_or_else(|_| "/tmp/arcade-game.json".to_string()),
+            config_path: config::config_path(),
+            epoch: tokio::time::Instant::now(),
+            gap_until_ms: None,
         }
+    }
+
+    /// Monotonic milliseconds since the task started.
+    fn now(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
     }
 
     // ── Input ────────────────────────────────────────────────────────────────
 
     fn handle(&mut self, input: GameInput) {
         match input {
-            GameInput::Device { device_id, event } => self.on_device_event(&device_id, &event),
+            GameInput::Device {
+                device_id,
+                event,
+                gap,
+            } => self.on_device_event(&device_id, &event, gap),
             GameInput::Client {
                 action,
                 is_admin,
@@ -363,7 +392,7 @@ impl Game {
         }
     }
 
-    fn on_device_event(&mut self, device_id: &str, event: &Value) {
+    fn on_device_event(&mut self, device_id: &str, event: &Value, gap: bool) {
         // Auto-bind the first board that speaks: there is only ever one on the
         // table, and making the operator bind it by hand before anything works
         // is a step to forget under stage lights. `bind_device` overrides.
@@ -374,17 +403,39 @@ impl Game {
         if self.device_id.as_deref() != Some(device_id) {
             return;
         }
-        let now = now_ms();
+        let now = self.now();
         let etype = event.get("type").and_then(Value::as_str).unwrap_or("");
         let data = event.get("data").cloned().unwrap_or(Value::Null);
+        // A gap means the deltas since the last known-good point describe a
+        // board that never existed. The server already re-requests a snapshot;
+        // until that lands, nothing may be committed off the torn view.
+        if gap {
+            self.gap_until_ms = Some(now);
+            tracing::debug!("device event stream tore; holding detection until the next snapshot");
+        }
         match etype {
-            "board.snapshot" => self.obs.apply_snapshot(&data, now),
+            "board.snapshot" => {
+                self.obs.apply_snapshot(&data, now);
+                // Authoritative by contract: this *is* the heal.
+                self.gap_until_ms = None;
+                self.obs.clear_journal();
+            }
             "sensor.changed" => self.obs.apply_sensor_changed(&data, now),
             "node.status" => self.obs.apply_node_status(&data, now),
             "command.result" => self.on_command_result(event),
             _ => return,
         }
         self.dirty = true;
+    }
+
+    /// True while the observer's view is known to be torn.
+    ///
+    /// Gap detection only fires on the *next* sequenced event, and the only
+    /// periodic one is `device.status` every 15 s — so a dropped trailing event
+    /// can leave the view torn for far longer than the 700 ms settle window it
+    /// has to beat.
+    fn stream_torn(&self) -> bool {
+        self.gap_until_ms.is_some()
     }
 
     /// Capability discovery. An unknown UART message type answers error code 2,
@@ -424,6 +475,12 @@ impl Game {
         if result.game_seq != self.game_seq {
             return;
         }
+        // An admin decree is the last word by design, so a search that was
+        // already in flight when it landed must not quietly overwrite it — and
+        // during scoring that search would otherwise decide the winner.
+        if self.eval.source == EvalSource::Admin {
+            return;
+        }
         let result = if result.available {
             result
         } else {
@@ -441,12 +498,39 @@ impl Game {
         // position actually scored — not the 0.00 the mining band implies.
         if self.moves.is_empty() {
             self.start_cp = result.cp;
+            self.start_source = result.source;
         }
         if result.final_verdict && self.phase == Phase::Scoring {
-            let winner = engine::verdict(self.start_cp, result.cp, self.tun.draw_band_cp);
+            let winner = self.verdict_for(result.cp, result.source);
             self.finish(winner, "eval", Some(result.cp));
         }
         self.dirty = true;
+    }
+
+    /// The swing only means anything if both ends were measured with the same
+    /// ruler. A 2 s final search against a 3 s timeout is the longest and
+    /// tightest search of the game, so a fallback to material at exactly that
+    /// moment is realistic — and it is the number the whole demo is judged on.
+    ///
+    /// Measured against the shipped deck the two scales disagree by a median of
+    /// ~40 cp, which is the entire draw band, so a mismatch is not a rounding
+    /// error: it is a coin flip wearing a confident badge. Refuse to name a
+    /// winner instead, and say why.
+    fn verdict_for(&mut self, final_cp: i32, final_source: EvalSource) -> &'static str {
+        let comparable = self.start_source == final_source
+            || (self.start_source != EvalSource::Material
+                && final_source != EvalSource::Material);
+        if !comparable {
+            tracing::warn!(
+                start = ?self.start_source,
+                final_source = ?final_source,
+                "eval baseline and final came from different engines; declaring a draw"
+            );
+            self.manual_degraded.insert("verdict_incomparable".to_string());
+            return "draw";
+        }
+        self.manual_degraded.remove("verdict_incomparable");
+        engine::verdict(self.start_cp, final_cp, self.rules.draw_band_cp)
     }
 
     // ── Client actions ───────────────────────────────────────────────────────
@@ -456,7 +540,7 @@ impl Game {
         let reject = |reason: &str| {
             let _ = reply.try_send(json!({ "type": "error", "reason": reason }).to_string());
         };
-        if !(is_admin || (open_controls() && is_player_action(name))) {
+        if !(is_admin || (self.rules.open_controls && is_player_action(name))) {
             return reject("unauthorized");
         }
         let ok = match name {
@@ -468,7 +552,9 @@ impl Game {
             "resync" => self.resync(),
             "set_detect" => self.set_detect(action),
             "mask_square" => self.mask_square(action),
-            "set_tunables" => self.set_tunables(action),
+            // `set_tunables` is the documented name and still works; `set_config`
+            // is the schema-driven form the admin rail uses.
+            "set_tunables" | "set_config" => self.set_config(action),
             "set_eval" => self.set_eval(action),
             "set_fen" => self.set_fen(action),
             "rescore" => self.rescore(),
@@ -478,11 +564,17 @@ impl Game {
             "set_rotation" => self.set_rotation(action),
             "bars_map" => self.bars_map(action),
             "bars_test" => self.bars_test(action),
+            "bars_sides" => self.bars_sides(action),
+            "set_palette" => self.set_palette(action),
+            "node_config" => self.node_config(action),
             "autopilot" => self.set_autopilot(action),
             _ => false,
         };
         if !ok {
             return reject("invalid_args");
+        }
+        if self.config_dirty {
+            self.persist_config();
         }
         self.dirty = true;
     }
@@ -527,6 +619,11 @@ impl Game {
         self.countdown_until = None;
         self.eval = EvalView::default();
         self.start_cp = 0;
+        self.start_source = EvalSource::Material;
+        self.gap_until_ms = None;
+        // Auto-masks are per-game evidence about a position that is now gone.
+        // Operator masks are calibration and deliberately survive.
+        self.clear_auto_masks();
         self.obs.clear_journal();
         self.painter.forget();
         // One consistent "a piece is here" colour costs an EEPROM commit per
@@ -581,15 +678,21 @@ impl Game {
     }
 
     fn action_choose(&mut self, action: &Value) -> bool {
+        // The guard comes first. Settles keep being processed throughout
+        // `AwaitingChoice`, so the prompt can be resolved out from under an
+        // operator whose tap is already in flight — and without this, that tap
+        // dragged Scoring or Finished back into Playing, discarding the pending
+        // verdict on the way.
+        if !self.phase.in_play() {
+            return false;
+        }
         let uci = action.get("uci").and_then(Value::as_str).unwrap_or("");
         // "None of these" dismisses the prompt and leaves the position alone.
         if uci.is_empty() {
             self.choice = None;
+            self.mismatch.clear();
             self.phase = Phase::Playing;
             return true;
-        }
-        if !self.phase.in_play() {
-            return false;
         }
         self.commit(uci, "chosen", Confidence::Certain, None)
     }
@@ -620,9 +723,15 @@ impl Game {
     fn resync(&mut self) -> bool {
         self.obs.clear_journal();
         self.disagree_streak = [0; SQUARES];
+        // "Believe the board matches the game now" has to include the squares
+        // the game gave up on. Auto-masks were evidence about a position that no
+        // longer exists, and without clearing them they accumulate silently
+        // across every game of the evening.
+        self.clear_auto_masks();
         self.nudge = None;
         self.mismatch.clear();
         self.choice = None;
+        self.gap_until_ms = None;
         if self.phase == Phase::AwaitingChoice {
             self.phase = Phase::Playing;
         }
@@ -639,6 +748,7 @@ impl Game {
             return false;
         };
         self.detect_mode = mode;
+        self.config_dirty = true;
         true
     }
 
@@ -661,37 +771,132 @@ impl Game {
             self.auto_masked.remove(&(square as u8));
         }
         self.disagree_streak[square as usize] = 0;
+        self.config_dirty = true;
         true
     }
 
-    fn set_tunables(&mut self, action: &Value) -> bool {
+    /// Every tunable, by key, clamped to the range the server itself advertises.
+    ///
+    /// Accepts both `{"key": "settle_ms", "value": 900}` and the older flat
+    /// `{"settle_ms": 900}` shape. An out-of-range number is clamped rather than
+    /// refused — under stage lights, "it went to the nearest sane value" beats
+    /// "nothing happened" — but an unknown key or an unparseable value is a hard
+    /// `invalid_args`, because a control that silently ignores you is worse than
+    /// one that says no.
+    fn set_config(&mut self, action: &Value) -> bool {
         let mut touched = false;
-        let mut take_u64 = |key: &str, slot: &mut u64| {
-            if let Some(v) = action.get(key).and_then(Value::as_u64) {
-                *slot = v;
+        if let Some(key) = action.get("key").and_then(Value::as_str) {
+            let value = action.get("value").unwrap_or(&Value::Null);
+            if !config::apply(&mut self.tun, &mut self.rules, key, value) {
+                return false;
+            }
+            touched = true;
+        }
+        if let Some(map) = action.as_object() {
+            for (key, value) in map {
+                if matches!(key.as_str(), "action" | "key" | "value") {
+                    continue;
+                }
+                if config::setting(key).is_none() {
+                    continue;
+                }
+                if !config::apply(&mut self.tun, &mut self.rules, key, value) {
+                    return false;
+                }
                 touched = true;
             }
-        };
-        take_u64("settle_ms", &mut self.tun.settle_ms);
-        take_u64("autostart_stable_ms", &mut self.tun.autostart_stable_ms);
-        take_u64("countdown_ms", &mut self.tun.countdown_ms);
-        if let Some(v) = action.get("unknown_tolerance").and_then(Value::as_u64) {
-            self.tun.unknown_tolerance = v as usize;
-            touched = true;
         }
-        if let Some(v) = action.get("tier3_max_distance").and_then(Value::as_f64) {
-            self.tun.tier3_max_distance = v;
-            touched = true;
-        }
-        if let Some(v) = action.get("tier3_margin").and_then(Value::as_f64) {
-            self.tun.tier3_margin = v;
-            touched = true;
-        }
-        if let Some(v) = action.get("draw_band_cp").and_then(Value::as_i64) {
-            self.tun.draw_band_cp = v as i32;
-            touched = true;
+        if touched {
+            self.config_dirty = true;
         }
         touched
+    }
+
+    /// Which board edges carry the eval bar and which carry the turn indicator.
+    /// Unknowable until the room is set up and the audience is standing
+    /// somewhere, so it is a live control rather than a constant.
+    fn bars_sides(&mut self, action: &Value) -> bool {
+        let read = |key: &str| -> Option<Vec<u8>> {
+            let arr = action.get(key)?.as_array()?;
+            let mut out = Vec::new();
+            for v in arr {
+                let side = v.as_u64()?;
+                if side as usize >= paint::SIDES {
+                    return None;
+                }
+                out.push(side as u8);
+            }
+            Some(out)
+        };
+        let eval = read("eval_sides");
+        let turn = read("turn_sides");
+        if eval.is_none() && turn.is_none() {
+            return false;
+        }
+        if let Some(eval) = eval {
+            self.eval_sides = eval;
+        }
+        if let Some(turn) = turn {
+            self.turn_sides = turn;
+        }
+        self.painter.forget();
+        self.config_dirty = true;
+        true
+    }
+
+    /// Live palette. Whether `ff8c00` reads as amber through a wooden board at
+    /// LED brightness 48 under venue lighting is not knowable from a desk, and
+    /// "amber = still needed" is the entire setup experience.
+    fn set_palette(&mut self, action: &Value) -> bool {
+        let mut touched = false;
+        let mut take = |key: &str, slot: &mut u32| {
+            if let Some(v) = action.get(key).and_then(Value::as_str) {
+                if let Ok(rgb) = u32::from_str_radix(v.trim_start_matches('#'), 16) {
+                    *slot = rgb & 0xff_ff_ff;
+                    touched = true;
+                }
+            }
+        };
+        let mut p = self.palette;
+        take("alert", &mut p.alert);
+        take("needed", &mut p.needed);
+        take("focus", &mut p.focus);
+        take("sweep", &mut p.sweep);
+        take("bar_white", &mut p.bar_white);
+        take("bar_black", &mut p.bar_black);
+        if !touched {
+            return false;
+        }
+        self.palette = p;
+        // The board is showing the old colours right now, so drop the diff and
+        // let the next frame repaint from scratch.
+        self.painter.forget();
+        self.config_dirty = true;
+        true
+    }
+
+    /// Pass-through to the AVR's own EEPROM config keys (thresholds, debounce,
+    /// LED brightness, polarity colours, orientation). The transport already
+    /// existed; only a way to reach it from the web did not — which left the
+    /// most venue-dependent values in the system behind a USB cable.
+    ///
+    /// Each write commits EEPROM (~240 ms), so this is deliberately one key at a
+    /// time and driven by a human, never by a frame.
+    fn node_config(&mut self, action: &Value) -> bool {
+        let node = action.get("node").and_then(Value::as_u64);
+        let key = action.get("key").and_then(Value::as_u64);
+        let value = action.get("value").and_then(Value::as_u64);
+        let (Some(node), Some(key), Some(value)) = (node, key, value) else {
+            return false;
+        };
+        if node as usize >= NODES || key == 0 || key > 10 || value > u16::MAX as u64 {
+            return false;
+        }
+        self.send_command(
+            "node.config.set",
+            json!({ "node": node, "key": key, "value": value }),
+        );
+        true
     }
 
     fn set_eval(&mut self, action: &Value) -> bool {
@@ -727,6 +932,15 @@ impl Game {
         self.nudge = None;
         self.mismatch.clear();
         self.pol_tag = [None; SQUARES];
+        // Setup lighting, the placed/needed counter and the on-screen target all
+        // derive from `start_fen`. Leaving it pointing at the superseded
+        // position meant the board kept asking players to build the old one,
+        // auto-started on it, and began play in total mismatch.
+        if !self.phase.in_play() {
+            self.start_fen = fen.to_string();
+            self.position = None;
+            self.start_cp = 0;
+        }
         if self.phase == Phase::Idle || self.phase == Phase::Finished {
             self.phase = Phase::Playing;
         }
@@ -783,6 +997,7 @@ impl Game {
         self.device_id = Some(device_id.to_string());
         self.obs.reset_board();
         self.request_snapshot();
+        self.config_dirty = true;
         true
     }
 
@@ -795,6 +1010,7 @@ impl Game {
         }
         self.obs.set_rotation((degrees / 90) as u8);
         self.painter.forget();
+        self.config_dirty = true;
         true
     }
 
@@ -825,6 +1041,7 @@ impl Game {
             slot.reversed = reversed;
         }
         self.painter.forget();
+        self.config_dirty = true;
         true
     }
 
@@ -847,6 +1064,11 @@ impl Game {
             .filter(|&p| p < 8);
         let command = Painter::bars_test(node as u8, strip, pixel);
         self.send_command(command.name, command.args);
+        // Written straight down the wire, bypassing the diff — so the painter's
+        // record of that half-bar is now wrong and the next frame would skip it,
+        // leaving the walking-pixel test stuck on the strip for the rest of the
+        // game.
+        self.painter.forget();
         true
     }
 
@@ -859,11 +1081,11 @@ impl Game {
         let interval_ms = action
             .get("interval_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(4000)
+            .unwrap_or(self.rules.autopilot_interval_ms)
             .clamp(500, 60_000);
         self.autopilot = Some(Autopilot {
             interval_ms,
-            next_ms: now_ms() + interval_ms,
+            next_ms: self.now() + interval_ms,
         });
         true
     }
@@ -871,7 +1093,7 @@ impl Game {
     // ── The clock ────────────────────────────────────────────────────────────
 
     fn tick(&mut self) {
-        let now = now_ms();
+        let now = self.now();
         match self.phase {
             Phase::Setup => self.tick_setup(now),
             Phase::Countdown => self.tick_countdown(now),
@@ -886,6 +1108,19 @@ impl Game {
     }
 
     fn tick_setup(&mut self, now: u64) {
+        // `Observer` has no notion of link liveness: a websocket disconnect
+        // touches neither `node_online` nor `last_change_ms`, so a frozen
+        // snapshot looks exactly like a board holding perfectly still. Without
+        // this the countdown runs off a dead link and `begin_play` fingerprints
+        // `pol_tag` from a board nobody can see — while the very same broadcast
+        // says `sensors_live: false`.
+        if !self.sensors_live(now) || self.stream_torn() {
+            if self.stable_since.is_some() {
+                self.dirty = true;
+            }
+            self.stable_since = None;
+            return;
+        }
         let diff = self.setup_diff();
         let ready = diff.missing.is_empty()
             && diff.extra.is_empty()
@@ -901,12 +1136,22 @@ impl Game {
         let since = *self.stable_since.get_or_insert(now);
         if now.saturating_sub(since) >= self.tun.autostart_stable_ms {
             self.phase = Phase::Countdown;
-            self.countdown_until = Some(now + self.tun.countdown_ms);
+            self.countdown_until = Some(now + self.rules.countdown_ms);
             self.dirty = true;
         }
     }
 
     fn tick_countdown(&mut self, now: u64) {
+        // Losing the board mid-countdown aborts it too — starting a game off a
+        // snapshot that stopped updating three seconds ago is worse than asking
+        // the operator to press Start.
+        if !self.sensors_live(now) || self.stream_torn() {
+            self.phase = Phase::Setup;
+            self.countdown_until = None;
+            self.stable_since = None;
+            self.dirty = true;
+            return;
+        }
         // Any board change aborts the countdown: someone is still building.
         let diff = self.setup_diff();
         if !diff.missing.is_empty() || !diff.extra.is_empty() {
@@ -926,6 +1171,10 @@ impl Game {
 
     fn tick_playing(&mut self, now: u64) {
         if self.detect_mode == DetectMode::Off || !self.sensors_live(now) {
+            return;
+        }
+        // Never infer off a torn delta stream; the pending snapshot is the heal.
+        if self.stream_torn() {
             return;
         }
         if !self.obs.settled(now, self.tun.settle_ms) {
@@ -969,12 +1218,14 @@ impl Game {
             journal: &self.obs.journal,
             pol_tag: &self.pol_tag,
         };
-        let params = infer::Params {
-            max_distance: self.tun.tier3_max_distance,
-            margin: self.tun.tier3_margin,
-        };
+        let params = self.tun.params();
         let inference = infer::infer(&self.pos, &observation, &params);
+        self.on_inference(inference);
+    }
 
+    /// Split out from `on_settle` so the outcome handling can be tested without
+    /// having to stage a physical board that produces it.
+    fn on_inference(&mut self, inference: Inference) {
         match inference {
             Inference::NoChange => {
                 self.nudge = None;
@@ -1023,12 +1274,15 @@ impl Game {
                         return;
                     }
                 }
-                self.mismatch = squares.clone();
+                // After `ask`, not before: `ask` clears any mismatch left over
+                // from a previous settle, and this one is the reason it is
+                // asking.
                 self.ask(
                     "no_match",
                     "The board doesn't match any legal move.".to_string(),
                     options,
                 );
+                self.mismatch = squares.clone();
             }
         }
         self.update_auto_mask();
@@ -1036,12 +1290,27 @@ impl Game {
     }
 
     fn ask(&mut self, kind: &'static str, prompt: String, options: Vec<infer::Candidate>) {
+        // A stale mismatch left over from a previous settle makes `compose_frame`
+        // paint the board Alert, and the Basic tier can only show one class at a
+        // time — so the candidates the prompt is asking about never light up,
+        // and two superseded red squares do instead.
+        self.mismatch.clear();
         self.choice = Some(Choice {
             kind,
             prompt,
             options,
         });
         self.phase = Phase::AwaitingChoice;
+    }
+
+    /// Retires the masks the game applied itself, leaving the operator's alone.
+    fn clear_auto_masks(&mut self) {
+        for square in std::mem::take(&mut self.auto_masked) {
+            self.obs.masked[square as usize] = false;
+            self.manual_degraded
+                .remove(&format!("sensor_{square}_suspect"));
+        }
+        self.disagree_streak = [0; SQUARES];
     }
 
     /// A square that disagrees with expectation across two consecutive settles
@@ -1052,6 +1321,16 @@ impl Game {
     /// Only ever during play: during setup a piece on the wrong square looks
     /// identical, and masking it would let a bad build pass.
     fn update_auto_mask(&mut self) {
+        // Never while a prompt is open. The whole point of `AwaitingChoice` is
+        // that the game position has deliberately not advanced yet, so the
+        // pending move's own from/to squares disagree *by construction* — two
+        // settles of the operator reading the screen and they would be masked,
+        // with a `sensor_N_suspect` chip blaming hardware that is fine. In
+        // `suggest` mode, the recommended on-stage fallback, every single ply
+        // goes through here.
+        if self.phase != Phase::Playing {
+            return;
+        }
         let expected = infer::occupancy(&self.pos);
         for (square, &expected_here) in expected.iter().enumerate() {
             if !self.obs.known(square) {
@@ -1070,10 +1349,14 @@ impl Game {
                 continue;
             }
             self.disagree_streak[square] = self.disagree_streak[square].saturating_add(1);
-            if self.disagree_streak[square] >= 2 {
+            if self.disagree_streak[square] >= self.tun.auto_mask_streak {
                 self.obs.masked[square] = true;
                 self.auto_masked.insert(square as u8);
-                tracing::info!(square, "square disagreed twice running; masking it");
+                tracing::info!(
+                    square,
+                    streak = self.disagree_streak[square],
+                    "square disagreed repeatedly; masking it"
+                );
             }
         }
     }
@@ -1113,7 +1396,22 @@ impl Game {
         self.game_seq += 1;
         self.choice = None;
         self.mismatch.clear();
-        self.nudge = offset;
+        // A standing nudge means a piece is physically on the wrong square. Only
+        // the move that actually touches it can have fixed that, so a commit
+        // arriving from anywhere else — a tapped prompt, a manual move,
+        // autopilot — must not silently retire the banner and leave the board
+        // one piece out of place with nothing on screen saying so.
+        self.nudge = match offset {
+            Some(offset) => Some(offset),
+            None => self.nudge.filter(|standing| {
+                let from = m.from().map(u8::from);
+                let to = u8::from(m.to());
+                from != Some(standing.actual)
+                    && from != Some(standing.expected)
+                    && to != standing.expected
+                    && to != standing.actual
+            }),
+        };
         self.obs.clear_journal();
         self.last_inferred_change_ms = self.obs.last_change_ms;
         self.phase = Phase::Playing;
@@ -1127,7 +1425,7 @@ impl Game {
             self.finish(winner, "mate", None);
         } else if self.pos.is_stalemate() || self.pos.is_insufficient_material() {
             self.finish("draw", "stalemate", None);
-        } else if self.moves.len() >= self.max_ply {
+        } else if self.moves.len() >= self.rules.max_ply {
             self.phase = Phase::Scoring;
             self.request_eval(true);
         } else {
@@ -1230,6 +1528,13 @@ impl Game {
         if self.phase == Phase::Idle || self.device_id.is_none() {
             return;
         }
+        // A quadrant that came back has forgotten everything it was holding, so
+        // whatever the painter believes about it is fiction. Tear that up before
+        // composing, and the next frame rebuilds it.
+        for node in self.obs.take_rejoined() {
+            self.painter.node_rejoined(node);
+        }
+        self.painter.set_palette(self.palette);
         let frame = self.compose_frame(now);
         let rotation = self.obs.rotation;
         let online = self.obs.node_online;
@@ -1326,14 +1631,21 @@ impl Game {
             Phase::Idle => {}
         }
 
-        // Two sides carry the eval bar and two the turn indicator, so both
-        // players see both.
+        // Which edges carry which is a venue decision, not a constant: the eval
+        // bar is the narrative device the whole demo hangs on, and it has to be
+        // on the edge the audience is actually facing.
         frame.bars_wanted = !matches!(self.phase, Phase::Idle | Phase::Setup);
-        frame.eval_bar(0, self.eval.win_prob);
-        frame.eval_bar(2, self.eval.win_prob);
         let white_to_move = self.pos.turn() == Color::White;
-        frame.turn_bar(1, white_to_move);
-        frame.turn_bar(3, white_to_move);
+        for &side in &self.eval_sides {
+            if (side as usize) < paint::SIDES {
+                frame.eval_bar(side as usize, self.eval.win_prob, &self.palette);
+            }
+        }
+        for &side in &self.turn_sides {
+            if (side as usize) < paint::SIDES {
+                frame.turn_bar(side as usize, white_to_move, &self.palette);
+            }
+        }
         frame
     }
 
@@ -1367,6 +1679,13 @@ impl Game {
         if self.eval.status == "ok" && self.eval.source == EvalSource::Material {
             out.insert("engine_unavailable".to_string());
         }
+        // The delta stream tore and the healing snapshot has not landed. Worth
+        // naming: detection is deliberately held off during this window, so
+        // "the board stopped responding" needs an honest explanation rather
+        // than looking like a hang.
+        if self.stream_torn() {
+            out.insert("stream_gap".to_string());
+        }
         if !self.painter.bars_supported {
             out.insert("bars_unsupported".to_string());
         }
@@ -1383,7 +1702,7 @@ impl Game {
     }
 
     fn view(&self) -> Value {
-        let now = now_ms();
+        let now = self.now();
         let board_synced = {
             let expected = infer::occupancy(&self.pos);
             (0..SQUARES)
@@ -1411,7 +1730,7 @@ impl Game {
             "fen": engine::fen_of(&self.pos),
             "turn": if self.pos.turn() == Color::White { "white" } else { "black" },
             "ply": self.moves.len(),
-            "max_ply": self.max_ply,
+            "max_ply": self.rules.max_ply,
             "moves": self.moves.iter().map(|m| json!({
                 "uci": m.uci,
                 "san": m.san,
@@ -1438,19 +1757,28 @@ impl Game {
                 "depth": self.eval.depth,
                 "start_cp": self.start_cp,
             },
-            "tunables": {
-                "settle_ms": self.tun.settle_ms,
-                "autostart_stable_ms": self.tun.autostart_stable_ms,
-                "unknown_tolerance": self.tun.unknown_tolerance,
-                "tier3_max_distance": self.tun.tier3_max_distance,
-                "tier3_margin": self.tun.tier3_margin,
-                "draw_band_cp": self.tun.draw_band_cp,
-                "countdown_ms": self.tun.countdown_ms,
+            // Current values keyed exactly as `settings` names them, so the
+            // admin rail can pair the two without knowing any field names.
+            "tunables": config::values(&self.tun, &self.rules),
+            // The schema the rail renders itself from. Shipping the ranges means
+            // the UI cannot offer a value the server would refuse, and adding a
+            // knob is one line in `config::SETTINGS` rather than a change in five
+            // layers.
+            "settings": config::schema(),
+            "palette": {
+                "alert": format!("{:06x}", self.palette.alert),
+                "needed": format!("{:06x}", self.palette.needed),
+                "focus": format!("{:06x}", self.palette.focus),
+                "sweep": format!("{:06x}", self.palette.sweep),
+                "bar_white": format!("{:06x}", self.palette.bar_white),
+                "bar_black": format!("{:06x}", self.palette.bar_black),
             },
             "lighting": {
                 "squares": "override",
                 "bars_supported": self.painter.bars_supported,
                 "bar_map": self.painter.bar_map,
+                "eval_sides": self.eval_sides,
+                "turn_sides": self.turn_sides,
                 "colours_neutralised": self.painter.colours_neutralised,
             },
             "autopilot": self.autopilot.as_ref().map(|a| json!({ "interval_ms": a.interval_ms })),
@@ -1492,24 +1820,25 @@ impl Game {
         let text = view.to_string();
         self.state.set_game_view(view);
         self.state.broadcast_msg(text);
-        if self.last_persisted_phase != Some(self.phase) {
-            self.last_persisted_phase = Some(self.phase);
+        // Keyed on `(phase, game_seq)`, not phase alone. A clean auto-detected
+        // run never leaves `Playing`, so a phase-only key wrote once at the
+        // start of the game and then went stale for the rest of it — losing
+        // exactly the demo case that matters.
+        let key = (self.phase, self.game_seq);
+        if self.last_persisted != Some(key) {
+            self.last_persisted = Some(key);
             self.persist();
         }
     }
 
     // ── Restart insurance ────────────────────────────────────────────────────
 
-    fn snapshot_path() -> String {
-        std::env::var("GAME_SNAPSHOT_PATH").unwrap_or_else(|_| "/tmp/arcade-game.json".to_string())
-    }
-
     /// Written on every phase change, so a server restart or redeploy mid-demo
     /// is not fatal. Without it the rule is simply: do not redeploy during the
     /// demo, and restart the round — it is a five-minute game.
     fn persist(&self) {
         if self.phase == Phase::Idle {
-            let _ = std::fs::remove_file(Self::snapshot_path());
+            let _ = std::fs::remove_file(&self.snapshot_path);
             return;
         }
         let payload = json!({
@@ -1523,13 +1852,13 @@ impl Game {
             })).collect::<Vec<_>>(),
             "eval_cp": self.eval.cp,
         });
-        if let Err(err) = std::fs::write(Self::snapshot_path(), payload.to_string()) {
+        if let Err(err) = std::fs::write(&self.snapshot_path, payload.to_string()) {
             tracing::warn!(%err, "could not write the game snapshot");
         }
     }
 
     fn restore(&mut self) {
-        let Ok(text) = std::fs::read_to_string(Self::snapshot_path()) else {
+        let Ok(text) = std::fs::read_to_string(&self.snapshot_path) else {
             return;
         };
         let Ok(saved) = serde_json::from_str::<Value>(&text) else {
@@ -1577,17 +1906,133 @@ impl Game {
         // History is not restored: undo across a process restart would need the
         // whole position chain, and the honest thing is to say so rather than
         // half-support it.
+        // Mapped explicitly. Collapsing setup and countdown into `Playing` meant
+        // a crash during setup came back as a game in progress that would never
+        // run setup detection or auto-start again.
         self.phase = match saved.get("phase").and_then(Value::as_str) {
             Some("finished") => Phase::Finished,
             Some("idle") | None => Phase::Idle,
+            Some("setup") | Some("countdown") => Phase::Setup,
             _ => Phase::Playing,
         };
         self.game_seq += 1;
-        self.manual_degraded.insert("restored_after_restart".to_string());
+        self.manual_degraded
+            .insert("restored_after_restart".to_string());
         tracing::info!(phase = ?self.phase, plies = self.moves.len(), "restored game after restart");
         if self.phase != Phase::Idle {
             self.request_eval(false);
         }
+    }
+
+    // ── Venue profile ────────────────────────────────────────────────────────
+    //
+    // The runbook budgets ten minutes at the venue to bind the device, square
+    // the board up, mask whatever lies and assign the bar map. That is the
+    // expensive artifact of the evening — the five-minute puzzle above can
+    // simply be replayed. So it is written on every change and read back before
+    // the game snapshot, and it lives outside `/tmp`, which does not survive the
+    // container being replaced.
+
+    /// Assembles the profile from live state. Nothing here is a second copy: the
+    /// observer owns rotation and masks, the painter owns the bar map, and this
+    /// is only their serialised view.
+    fn profile(&self) -> config::VenueProfile {
+        config::VenueProfile {
+            device_id: self.device_id.clone(),
+            rotation: self.obs.rotation,
+            masked: (0..SQUARES)
+                .filter(|&sq| self.obs.masked[sq] && !self.auto_masked.contains(&(sq as u8)))
+                .map(|sq| sq as u8)
+                .collect(),
+            bar_map: Some(self.painter.bar_map_slots()),
+            detect_mode: Some(self.detect_mode.as_str().to_string()),
+            eval_sides: self.eval_sides.clone(),
+            turn_sides: self.turn_sides.clone(),
+        }
+    }
+
+    fn persist_config(&mut self) {
+        self.config_dirty = false;
+        let file = config::ConfigFile {
+            version: config::CONFIG_VERSION,
+            tunables: Some(self.tun),
+            rules: Some(self.rules),
+            palette: Some(self.palette),
+            profile: Some(self.profile()),
+        };
+        let path = self.config_path.clone();
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&file) {
+            Ok(text) => {
+                if let Err(err) = std::fs::write(&path, text) {
+                    // Not fatal: everything still works for this process, the
+                    // calibration just will not outlive it. Say so rather than
+                    // letting a restart quietly discard the evening.
+                    tracing::warn!(%err, path, "could not write the venue profile");
+                    self.manual_degraded
+                        .insert("config_not_persisted".to_string());
+                    return;
+                }
+                self.manual_degraded.remove("config_not_persisted");
+            }
+            Err(err) => tracing::warn!(%err, "could not serialise the venue profile"),
+        }
+    }
+
+    fn restore_config(&mut self) {
+        let path = self.config_path.clone();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let file: config::ConfigFile = match serde_json::from_str(&text) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::warn!(%err, path, "venue profile is unreadable; using defaults");
+                return;
+            }
+        };
+        if file.version != config::CONFIG_VERSION {
+            tracing::warn!(
+                found = file.version,
+                expected = config::CONFIG_VERSION,
+                "venue profile is from another build; using defaults"
+            );
+            return;
+        }
+        if let Some(tun) = file.tunables {
+            self.tun = tun;
+        }
+        if let Some(rules) = file.rules {
+            self.rules = rules;
+        }
+        if let Some(palette) = file.palette {
+            self.palette = palette;
+        }
+        // A file edited by hand, or written by a build with different limits,
+        // must not be able to smuggle in a value the wire would reject.
+        config::clamp_all(&mut self.tun, &mut self.rules);
+
+        if let Some(profile) = file.profile {
+            self.device_id = profile.device_id.clone();
+            self.obs.set_rotation(profile.rotation);
+            self.obs.masked = profile.masked_array();
+            if let Some(mode) = profile.detect_mode.as_deref().and_then(DetectMode::parse) {
+                self.detect_mode = mode;
+            }
+            if let Some(map) = profile.bar_map {
+                self.painter.set_bar_map_slots(&map);
+            }
+            if !profile.eval_sides.is_empty() || !profile.turn_sides.is_empty() {
+                self.eval_sides = profile.eval_sides;
+                self.turn_sides = profile.turn_sides;
+            }
+            for sq in (0..SQUARES).filter(|&sq| self.obs.masked[sq]) {
+                self.manual_degraded.insert(format!("sensor_{sq}_masked"));
+            }
+        }
+        tracing::info!(path, "restored the venue profile");
     }
 }
 
@@ -1610,15 +2055,495 @@ fn uci_squares(m: &UciMove) -> Vec<u8> {
     }
 }
 
-fn open_controls() -> bool {
-    std::env::var("GAME_OPEN_CONTROLS").map(|v| v == "1").unwrap_or(false)
-}
-
 /// The actions a second, unauthenticated tablet at the board may drive when
-/// `GAME_OPEN_CONTROLS=1`. Everything destructive stays admin-only.
+/// `open_controls` is on. Everything destructive stays admin-only.
 fn is_player_action(name: &str) -> bool {
     matches!(
         name,
         "new_game" | "start" | "move" | "choose" | "undo" | "resync"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Every seam this needs already existed: `AppState::new` is trivially
+    /// constructible, `EngineHandle` is a bare channel wrapper, and every
+    /// deadline takes injected time. The orchestrator was untested by omission,
+    /// not by design.
+    fn game() -> Game {
+        let state = Arc::new(AppState::new("test".to_string(), None));
+        let (tx, rx) = mpsc::unbounded_channel::<engine::EvalResult>();
+        // Keep the receiver alive so `request` keeps reporting the engine up.
+        std::mem::forget(rx);
+        let engine = engine::EngineHandle::for_test(mpsc::unbounded_channel().0);
+        drop(tx);
+        let mut game = Game::new(state, engine);
+        game.device_id = Some("test-board".to_string());
+        game.obs.node_online = [true; NODES];
+        game.obs.have_snapshot = true;
+        game
+    }
+
+    fn deal(game: &mut Game, fen: &str) {
+        assert!(game.new_game(&json!({ "fen": fen })), "position must be legal");
+    }
+
+    /// Two consecutive disagreements retire a square. Mutating this threshold to
+    /// `>= 1` used to leave the whole suite green.
+    #[test]
+    fn auto_mask_needs_the_full_streak_and_only_during_play() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+
+        // e4 reads occupied but the game says it is empty.
+        game.obs.occ[28] = observe::Occ::Pos;
+
+        game.update_auto_mask();
+        assert_eq!(game.disagree_streak[28], 1);
+        assert!(!game.obs.masked[28], "one disagreement is a surprise");
+
+        game.update_auto_mask();
+        assert_eq!(game.disagree_streak[28], 2);
+        assert!(game.obs.masked[28], "two running is a stuck sensor");
+        assert!(game.auto_masked.contains(&28));
+        assert!(game.degraded(0).iter().any(|c| c == "sensor_28_suspect"));
+    }
+
+    /// While a prompt is open the game position has deliberately not advanced,
+    /// so the pending move's own squares disagree by construction. Masking them
+    /// blames hardware that is fine — and `suggest` mode routes every ply here.
+    #[test]
+    fn a_prompt_does_not_auto_mask_the_squares_it_is_asking_about() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+        game.obs.occ[28] = observe::Occ::Pos;
+
+        game.ask("capture", "which one?".into(), Vec::new());
+        assert_eq!(game.phase, Phase::AwaitingChoice);
+        for _ in 0..6 {
+            game.update_auto_mask();
+        }
+        assert!(
+            !game.obs.masked[28],
+            "an open prompt must not mask the board out from under itself"
+        );
+        assert_eq!(game.disagree_streak[28], 0);
+    }
+
+    /// A material baseline against a Stockfish final is two different scales
+    /// subtracted from each other. Half the shipped deck would flip out of
+    /// "draw" on that alone.
+    #[test]
+    fn a_verdict_across_two_engines_refuses_to_name_a_winner() {
+        let mut game = game();
+        game.start_cp = 0;
+
+        game.start_source = EvalSource::Material;
+        assert_eq!(
+            game.verdict_for(400, EvalSource::Stockfish),
+            "draw",
+            "mixed scales must not crown anybody"
+        );
+        assert!(game
+            .degraded(0)
+            .iter()
+            .any(|c| c == "verdict_incomparable"));
+
+        // Same ruler at both ends, and the swing is real.
+        game.start_source = EvalSource::Stockfish;
+        assert_eq!(game.verdict_for(400, EvalSource::Stockfish), "white");
+        assert_eq!(game.verdict_for(-400, EvalSource::Stockfish), "black");
+        assert_eq!(game.verdict_for(10, EvalSource::Stockfish), "draw");
+        assert!(!game
+            .degraded(0)
+            .iter()
+            .any(|c| c == "verdict_incomparable"));
+
+        // An admin decree is comparable with anything: it is the last word.
+        game.start_source = EvalSource::Stockfish;
+        assert_eq!(game.verdict_for(400, EvalSource::Admin), "white");
+    }
+
+    /// The decree is documented as the last word, so a search already in flight
+    /// must not land on top of it.
+    #[test]
+    fn an_in_flight_eval_cannot_overwrite_an_admin_decree() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        assert!(game.set_eval(&json!({ "cp": 250 })));
+        assert_eq!(game.eval.source, EvalSource::Admin);
+
+        game.on_eval(engine::EvalResult {
+            game_seq: game.game_seq,
+            cp: -30,
+            mate: None,
+            win_prob: 0.4,
+            depth: 12,
+            source: EvalSource::Stockfish,
+            final_verdict: false,
+            available: true,
+        });
+        assert_eq!(game.eval.cp, 250, "the decree stands");
+        assert_eq!(game.eval.source, EvalSource::Admin);
+    }
+
+    /// The empty-uci dismissal used to return before the phase guard, so it
+    /// could drag Scoring or Finished back into Playing and discard the pending
+    /// verdict on the way.
+    #[test]
+    fn dismissing_a_prompt_cannot_resurrect_a_finished_game() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+
+        for phase in [
+            Phase::Idle,
+            Phase::Setup,
+            Phase::Countdown,
+            Phase::Scoring,
+            Phase::Finished,
+        ] {
+            game.phase = phase;
+            assert!(
+                !game.action_choose(&json!({ "uci": "" })),
+                "{phase:?} must reject a choice"
+            );
+            assert_eq!(game.phase, phase, "{phase:?} must not be moved");
+        }
+
+        game.phase = Phase::AwaitingChoice;
+        assert!(game.action_choose(&json!({ "uci": "" })));
+        assert_eq!(game.phase, Phase::Playing);
+    }
+
+    /// Setup lighting, the placed counter and the on-screen target all derive
+    /// from `start_fen`, so overwriting the position has to move it too.
+    #[test]
+    fn set_fen_during_setup_moves_the_target_as_well() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        assert_eq!(game.phase, Phase::Setup);
+
+        let corrected = "8/8/4k3/8/8/8/8/4K2R w K - 0 1";
+        assert!(game.set_fen(&json!({ "fen": corrected })));
+        assert_eq!(
+            game.start_fen, corrected,
+            "the board must be asked to build the position the game is actually on"
+        );
+        assert_eq!(engine::fen_of(&game.pos), corrected);
+    }
+
+    /// A standing nudge means a piece is physically on the wrong square. Only a
+    /// move that touches it can have fixed that.
+    #[test]
+    fn an_unrelated_commit_keeps_a_standing_nudge() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+        // e4 expected, piece actually sitting on d4.
+        game.nudge = Some(Offset {
+            expected: 28,
+            actual: 27,
+        });
+
+        // A king move nowhere near the offset pair.
+        assert!(game.commit("d2d3", "manual", Confidence::Certain, None));
+        assert!(
+            game.nudge.is_some(),
+            "the piece is still on the wrong square and the board must keep saying so"
+        );
+
+        // Black's reply is unrelated too.
+        assert!(game.commit("f7f6", "manual", Confidence::Certain, None));
+        assert!(game.nudge.is_some());
+
+        // A move that actually lands on the nudged square resolves it: h5 is 39.
+        game.nudge = Some(Offset {
+            expected: 39,
+            actual: 38,
+        });
+        assert!(game.commit("h1h5", "manual", Confidence::Certain, None));
+        assert!(game.nudge.is_none(), "the board no longer has anything to ask for");
+    }
+
+    /// A stale mismatch makes the Basic tier paint the board Alert, which
+    /// suppresses the very candidates the prompt is asking about.
+    #[test]
+    fn opening_a_prompt_clears_the_previous_mismatch() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+        game.mismatch = vec![12, 13];
+        game.ask("capture", "which one?".into(), Vec::new());
+        assert!(game.mismatch.is_empty());
+    }
+
+    /// ...but a `no_match` prompt must still carry the squares it is complaining
+    /// about, so the clear above has to happen *before* they are assigned.
+    #[test]
+    fn a_no_match_prompt_keeps_the_squares_it_is_about() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+
+        game.on_inference(infer::Inference::Mismatch {
+            squares: vec![19, 42],
+            options: Vec::new(),
+        });
+        assert_eq!(game.phase, Phase::AwaitingChoice);
+        assert_eq!(
+            game.mismatch,
+            vec![19, 42],
+            "the board has to light the squares the prompt is asking about"
+        );
+    }
+
+    /// The expensive artifact of the evening is the calibration, not the
+    /// five-minute puzzle. This round trip is what F5 was about.
+    #[test]
+    fn the_venue_profile_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("arcade-cfg-{}", crate::util::random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("venue.json");
+
+        {
+            let mut game = game();
+            game.config_path = path.display().to_string();
+            game.obs.set_rotation(2);
+            assert!(game.mask_square(&json!({ "square": 27, "masked": true })));
+            assert!(game.set_detect(&json!({ "mode": "suggest" })));
+            assert!(game.bars_sides(&json!({ "eval_sides": [1, 3], "turn_sides": [0, 2] })));
+            assert!(game.set_config(&json!({ "key": "settle_ms", "value": 1250 })));
+            assert!(game.bind_device(&json!({ "device_id": "arcade-chess-007" })));
+            game.persist_config();
+        }
+
+        let mut fresh = Game::new(
+            Arc::new(AppState::new("test".to_string(), None)),
+            engine::EngineHandle::for_test(mpsc::unbounded_channel().0),
+        );
+        fresh.config_path = path.display().to_string();
+        fresh.restore_config();
+
+        assert_eq!(fresh.obs.rotation, 2, "board mounting survives");
+        assert!(fresh.obs.masked[27], "the lying sensor stays retired");
+        assert_eq!(fresh.detect_mode, DetectMode::Suggest);
+        assert_eq!(fresh.eval_sides, vec![1, 3]);
+        assert_eq!(fresh.turn_sides, vec![0, 2]);
+        assert_eq!(fresh.tun.settle_ms, 1250);
+        assert_eq!(fresh.device_id.as_deref(), Some("arcade-chess-007"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file written by hand or by an older build must not smuggle in a value
+    /// the wire itself would refuse.
+    #[test]
+    fn a_hand_edited_profile_is_clamped_on_the_way_in() {
+        let dir = std::env::temp_dir().join(format!("arcade-cfg-{}", crate::util::random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("venue.json");
+        std::fs::write(
+            &path,
+            json!({
+                "version": config::CONFIG_VERSION,
+                "tunables": {
+                    "settle_ms": 0,
+                    "autostart_stable_ms": 1500,
+                    "unknown_tolerance": 0,
+                    "tier3_max_distance": 9999.0,
+                    "tier3_margin": 1.0,
+                    "tier3_neighbour_credit": 0.5,
+                    "tier3_unreadable_penalty": 2.0,
+                    "tier3_empty_penalty": 1.0,
+                    "tier3_polarity_credit": 0.5,
+                    "auto_mask_streak": 2
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut game = game();
+        game.config_path = path.display().to_string();
+        game.restore_config();
+        assert_eq!(game.tun.settle_ms, 100, "clamped to the advertised floor");
+        assert_eq!(game.tun.tier3_max_distance, 1.75, "clamped to the ceiling");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A clean auto-detected run never leaves `Playing`, so keying the snapshot
+    /// on phase alone wrote once and then went stale for the whole game.
+    #[test]
+    fn the_game_snapshot_is_rewritten_every_ply() {
+        let dir = std::env::temp_dir().join(format!("arcade-snap-{}", crate::util::random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.json");
+
+        let mut game = game();
+        game.snapshot_path = path.display().to_string();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+        game.publish();
+
+        assert!(game.commit("h1h5", "manual", Confidence::Certain, None));
+        game.publish();
+        let after_one: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after_one["moves"].as_array().unwrap().len(), 1);
+
+        assert!(game.commit("f7f6", "manual", Confidence::Certain, None));
+        game.publish();
+        let after_two: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            after_two["moves"].as_array().unwrap().len(),
+            2,
+            "the second ply must reach disk too, without a phase change to trigger it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A crash during setup used to come back as a game in progress that would
+    /// never run setup detection again.
+    #[test]
+    fn a_restart_during_setup_comes_back_in_setup() {
+        let dir = std::env::temp_dir().join(format!("arcade-snap-{}", crate::util::random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.json");
+
+        let mut first = game();
+        first.snapshot_path = path.display().to_string();
+        deal(&mut first, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        assert_eq!(first.phase, Phase::Setup);
+        first.publish();
+
+        let mut fresh = game();
+        fresh.snapshot_path = path.display().to_string();
+        fresh.restore();
+        assert_eq!(fresh.phase, Phase::Setup, "still waiting for the board");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Auto-masks are evidence about a position that no longer exists.
+    #[test]
+    fn a_new_game_retires_auto_masks_but_keeps_operator_masks() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        assert!(game.mask_square(&json!({ "square": 10, "masked": true })));
+        game.obs.masked[42] = true;
+        game.auto_masked.insert(42);
+
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        assert!(game.obs.masked[10], "the operator's call stands");
+        assert!(!game.obs.masked[42], "the game's own guess does not");
+        assert!(game.auto_masked.is_empty());
+    }
+
+    /// Auto-start off a frozen snapshot fingerprints polarity from a board
+    /// nobody can see.
+    #[test]
+    fn a_dead_link_cannot_auto_start_a_game() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        // Build the position perfectly.
+        for sq in infer::occupancy(&game.pos)
+            .iter()
+            .enumerate()
+            .filter(|(_, &o)| o)
+            .map(|(sq, _)| sq)
+        {
+            game.obs.occ[sq] = observe::Occ::Pos;
+        }
+        game.obs.last_change_ms = 0;
+        game.obs.last_event_ms = 0;
+
+        // Far past both the settle window and the stability hold, but the device
+        // stopped talking a long time ago.
+        let now = SENSOR_STALE_MS + 10_000;
+        game.tick_setup(now);
+        game.tick_setup(now + 1);
+        assert_eq!(
+            game.phase,
+            Phase::Setup,
+            "a frozen snapshot is not a board holding still"
+        );
+        assert!(game.degraded(now).iter().any(|c| c == "sensors_stale"));
+    }
+
+    /// Nothing may be inferred off a torn delta stream.
+    #[test]
+    fn a_sequence_gap_holds_detection_until_the_snapshot_heals_it() {
+        let mut game = game();
+        deal(&mut game, "8/5k2/8/8/8/8/3K4/7R w - - 0 1");
+        game.phase = Phase::Playing;
+
+        game.on_device_event(
+            "test-board",
+            &json!({ "type": "sensor.changed", "data": { "square": 27, "state": "positive" } }),
+            true,
+        );
+        assert!(game.stream_torn());
+        assert!(game.degraded(0).iter().any(|c| c == "stream_gap"));
+
+        game.on_device_event(
+            "test-board",
+            &json!({
+                "type": "board.snapshot",
+                "data": { "squares": vec![0; 64], "valid": vec![true; 64], "online_node_mask": 0b1111 }
+            }),
+            false,
+        );
+        assert!(!game.stream_torn(), "the snapshot is the heal");
+    }
+
+    /// The unauthenticated tablet may play, but must not be able to rewrite the
+    /// calibration or decree a winner.
+    #[test]
+    fn open_controls_do_not_open_the_destructive_actions() {
+        for name in ["new_game", "start", "move", "choose", "undo", "resync"] {
+            assert!(is_player_action(name), "{name} should be player-facing");
+        }
+        for name in [
+            "set_config",
+            "set_tunables",
+            "set_eval",
+            "set_fen",
+            "end",
+            "abort",
+            "bind_device",
+            "mask_square",
+            "set_rotation",
+            "bars_map",
+            "node_config",
+            "set_palette",
+        ] {
+            assert!(!is_player_action(name), "{name} must stay admin-only");
+        }
+    }
+
+    /// The rail pairs `settings` with `tunables` by key, so the two have to
+    /// agree in every broadcast.
+    #[test]
+    fn the_broadcast_carries_a_schema_that_matches_its_values() {
+        let game = game();
+        let view = game.view();
+        let settings = view["settings"].as_array().expect("settings array");
+        let values = view["tunables"].as_object().expect("tunables object");
+        assert!(!settings.is_empty());
+        for spec in settings {
+            let key = spec["key"].as_str().unwrap();
+            assert!(values.contains_key(key), "{key} advertised but not valued");
+            for field in ["min", "max", "step", "label", "group", "kind"] {
+                assert!(!spec[field].is_null(), "{key} is missing {field}");
+            }
+        }
+    }
 }

@@ -36,10 +36,18 @@ COPY --from=builder /build/target/release/arcade-chess-server /usr/local/bin/arc
 # `-n` defaults to 20, so it always needs raising past the record count.
 # Mounting a volume over /srv/positions.json overrides it without a rebuild.
 # Either way, a deck that fails to load leaves the eight-position fallback
-# compiled into the binary in place and says `positions_embedded` in `degraded`.
+# compiled into the binary in place and says `positions_fallback` in `degraded`.
 COPY server/positions.json /srv/positions.json
+# The venue profile — device binding, board rotation, masked sensors, bar map,
+# detect mode and the tunables — is written here on every change and read back at
+# boot. Deliberately not `/tmp`: that does not survive the container being
+# replaced, which is exactly the event the profile exists to survive. Mount
+# /srv as a CapRover persistent volume and ten minutes of venue calibration
+# outlives a redeploy.
+VOLUME ["/srv"]
 EXPOSE 8080
 ENV PORT=8080 \
     STOCKFISH_PATH=/usr/games/stockfish \
-    POSITIONS_PATH=/srv/positions.json
+    POSITIONS_PATH=/srv/positions.json \
+    CONFIG_PATH=/srv/venue.json
 CMD ["arcade-chess-server"]

@@ -175,6 +175,10 @@
 </div>
 
 <style>
+	/* The slot decides how much room the board gets; the wrap just fills it. That
+	   keeps the sizing rule in one place — see `.board-slot` on the page — so a
+	   phone in portrait can hand the board its full width without this component
+	   knowing anything about the layout around it. */
 	.wrap {
 		display: grid;
 		grid-template-columns: 1.4em 1fr;
@@ -182,7 +186,7 @@
 		grid-template-areas:
 			'ranks board'
 			'corner files';
-		width: min(74vh, 92vw);
+		width: 100%;
 		gap: 4px;
 	}
 	.ranks {
@@ -253,8 +257,10 @@
 	.sq:not(:disabled) {
 		cursor: pointer;
 	}
-	.sq:not(:disabled):hover {
-		box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-probe) 65%, transparent);
+	@media (hover: hover) {
+		.sq:not(:disabled):hover {
+			box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-probe) 65%, transparent);
+		}
 	}
 
 	/* Piece present → the entire square is filled with a calm, matte signal
@@ -414,6 +420,39 @@
 		}
 		to {
 			box-shadow: inset 0 0 0 3px transparent;
+		}
+	}
+
+	/* Every pixel the gutter gives back is a pixel of board. */
+	@media (max-width: 520px) {
+		.wrap {
+			grid-template-columns: 1.1em 1fr;
+			grid-template-rows: 1fr 1.1em;
+			gap: 3px;
+		}
+		.ranks span,
+		.files span {
+			font-size: 9px;
+		}
+		.badge {
+			padding: 1px 4px;
+			font-size: 9px;
+		}
+		.q0,
+		.q1 {
+			bottom: 5px;
+		}
+		.q2,
+		.q3 {
+			top: 5px;
+		}
+		.q0,
+		.q2 {
+			left: 5px;
+		}
+		.q1,
+		.q3 {
+			right: 5px;
 		}
 	}
 

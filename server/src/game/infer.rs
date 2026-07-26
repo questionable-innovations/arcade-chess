@@ -103,10 +103,32 @@ pub struct Observation<'a> {
     pub pol_tag: &'a [Option<Pol>; SQUARES],
 }
 
+/// Every constant the matcher scores with, in one place.
+///
+/// These are calibrated *against each other*, not independently: with the
+/// shipped defaults, `unreadable_penalty` (2.0) sits above `max_distance` (1.0)
+/// precisely so that a masked or offline destination is a hard veto on
+/// committing onto it. Raising `max_distance` past `unreadable_penalty` to "be
+/// more permissive" silently re-enables the failure where one dead sensor
+/// quietly swallows every move played onto its square, so the two move together
+/// or not at all — see `config::limits()`, which advertises that ceiling.
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
     pub max_distance: f64,
     pub margin: f64,
+    /// The off-centre pair, credited once rather than counted as two
+    /// disagreements.
+    pub neighbour_credit: f64,
+    /// No confirmed arrival at all, because the destination cannot be read.
+    pub unreadable_penalty: f64,
+    /// Destination reads empty. Half of `unreadable_penalty` on purpose: an
+    /// empty square already contributed one as a plain disagreement, whereas a
+    /// masked one contributed nothing and owes both halves.
+    pub empty_penalty: f64,
+    /// Polarity fingerprint matches, so the same physical piece is still there.
+    /// Subtracted. A *mismatch* is never added — an off-centre piece can read
+    /// genuinely inverted, so it is not evidence against anything.
+    pub polarity_credit: f64,
 }
 
 impl Default for Params {
@@ -114,6 +136,10 @@ impl Default for Params {
         Params {
             max_distance: 1.0,
             margin: 1.0,
+            neighbour_credit: 0.5,
+            unreadable_penalty: 2.0,
+            empty_penalty: 1.0,
+            polarity_credit: 0.5,
         }
     }
 }
@@ -257,10 +283,20 @@ fn tier2(hyps: &[Hypothesis], exact: Vec<usize>, obs: &Observation) -> Inference
     // The transient journal. The victim was physically lifted at some point, so
     // its square shows a momentary empty or wobble; the other candidate
     // destinations were never touched.
+    // `known` is required here for the same reason every other term requires it:
+    // an unbelievable square must not supply *positive* evidence either. Without
+    // it a square that went unknown mid-ply — a quadrant dropping between the
+    // lift and the placement — could still carry a stale journal entry and name
+    // the wrong capture with full confidence. Losing the discriminator is the
+    // correct outcome: it falls through to the two-button prompt, which is what
+    // "journal lost to a seq gap" is supposed to do.
     let journalled: Vec<usize> = reduced
         .iter()
         .copied()
-        .filter(|&i| obs.journal[usize::from(u8::from(hyps[i].m.to()))])
+        .filter(|&i| {
+            let to = usize::from(u8::from(hyps[i].m.to()));
+            obs.known[to] && obs.journal[to]
+        })
         .collect();
     if journalled.len() == 1 {
         let h = &hyps[journalled[0]];
@@ -325,7 +361,12 @@ fn destinations_by_origin(hyps: &[Hypothesis]) -> [u64; SQUARES] {
 /// Additive score for one hypothesis. Every term is in the same unit and the
 /// whole thing is a sum, so there is exactly one way to implement it — which
 /// matters for constants that cannot be validated before game time.
-fn distance(h: &Hypothesis, obs: &Observation, dests: &[u64; SQUARES]) -> (f64, Option<Offset>) {
+fn distance(
+    h: &Hypothesis,
+    obs: &Observation,
+    dests: &[u64; SQUARES],
+    params: &Params,
+) -> (f64, Option<Offset>) {
     let mut disagree = disagreements(&h.occ, obs);
     let mut score = 0.0f64;
     let mut offset = None;
@@ -363,7 +404,7 @@ fn distance(h: &Hypothesis, obs: &Observation, dests: &[u64; SQUARES]) -> (f64, 
                 .collect();
             if stray.len() == 1 {
                 disagree.retain(|&sq| sq != to && sq != stray[0]);
-                score += 0.5;
+                score += params.neighbour_credit;
                 offset = Some(Offset {
                     expected: to,
                     actual: stray[0],
@@ -388,9 +429,9 @@ fn distance(h: &Hypothesis, obs: &Observation, dests: &[u64; SQUARES]) -> (f64, 
     let to = usize::from(u8::from(h.m.to()));
     if offset.is_none() {
         if !obs.known[to] {
-            score += 2.0;
+            score += params.unreadable_penalty;
         } else if disagree.contains(&(to as u8)) && !obs.occ[to].occupied() {
-            score += 1.0;
+            score += params.empty_penalty;
         }
     }
 
@@ -404,7 +445,7 @@ fn distance(h: &Hypothesis, obs: &Observation, dests: &[u64; SQUARES]) -> (f64, 
                 obs.occ[to].polarity(),
             ) {
                 if obs.known[to] && tag == now {
-                    score -= 0.5;
+                    score -= params.polarity_credit;
                 }
             }
         }
@@ -428,7 +469,7 @@ fn tier3(
         .iter()
         .enumerate()
         .map(|(i, h)| {
-            let (d, offset) = distance(h, obs, &dests);
+            let (d, offset) = distance(h, obs, &dests, params);
             (d, i, offset)
         })
         .collect();

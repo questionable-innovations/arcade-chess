@@ -191,11 +191,17 @@ bugs to have.
               "prompt": "Which capture was that?",
               "options": [{ "uci": "e4d5", "san": "exd5", "confidence": "likely" }] },
   "eval": { "cp": 34, "mate": null, "win_prob": 0.53, "status": "ok | pending",
-            "source": "stockfish | material | admin", "depth": 14, "start_cp": 12 },
+            "source": "stockfish | material | admin | unknown", "depth": 14, "start_cp": 12 },
   "result": { "winner": "white | black | draw", "final_cp": 123, "start_cp": 12,
               "swing": 111, "reason": "eval | mate | stalemate | admin" },
   "tunables": { "settle_ms": 700, "…": 0 },
+  "settings": [{ "key": "settle_ms", "group": "detection", "label": "settle window",
+                 "kind": "int", "min": 100, "max": 3000, "step": 50, "unit": "ms",
+                 "live": true, "help": "…" }],
+  "palette": { "alert": "d02020", "needed": "ff8c00", "focus": "2a6ad0",
+               "sweep": "f0f0f0", "bar_white": "e8e8e8", "bar_black": "303452" },
   "lighting": { "squares": "override", "bars_supported": true, "bar_map": [],
+                "eval_sides": [0, 2], "turn_sides": [1, 3],
                 "colours_neutralised": true },
   "autopilot": null,
   "deck": { "source": "/srv/positions.json", "count": 4821, "skipped": 3 },
@@ -213,7 +219,8 @@ only when one is pending, `result` only in `finished`.
 `degraded` is a product feature, not debug output: it renders as amber chips and
 gives whoever is presenting something honest to say when a subsystem drops.
 Stable values are `no_device`, `sensors_stale`, `node<N>_offline`,
-`engine_unavailable`, `bars_unsupported`, `positions_fallback`,
+`engine_unavailable`, `bars_unsupported`, `positions_fallback`, `stream_gap`,
+`verdict_incomparable`,
 `restored_after_restart`, `detect_suggest`, `detect_off`,
 `sensor_<square>_masked` and `sensor_<square>_suspect`. Clients must render an
 unrecognised code rather than dropping it.
@@ -236,7 +243,8 @@ Gated exactly like `command`. Everything is admin-only by default; setting
 { "type": "game", "action": "resync" }                   // board == game state now
 { "type": "game", "action": "set_detect", "mode": "auto | suggest | off" }
 { "type": "game", "action": "mask_square", "square": 27, "masked": true }
-{ "type": "game", "action": "set_tunables", "settle_ms": 700 }
+{ "type": "game", "action": "set_config", "key": "settle_ms", "value": 700 }
+{ "type": "game", "action": "set_tunables", "settle_ms": 700 }   // older flat form, still accepted
 { "type": "game", "action": "set_eval", "cp": 150 }
 { "type": "game", "action": "set_fen", "fen": "…" }      // overwrite the position
 { "type": "game", "action": "rescore" }
@@ -247,7 +255,22 @@ Gated exactly like `command`. Everything is admin-only by default; setting
 { "type": "game", "action": "bars_map", "side": 0, "half": 1, "node": 2, "strip": "a", "reversed": true }
 { "type": "game", "action": "bars_test", "node": 2, "strip": "a", "pixel": 3 }
 { "type": "game", "action": "autopilot", "on": true, "interval_ms": 4000 }
+{ "type": "game", "action": "bars_sides", "eval_sides": [0, 2], "turn_sides": [1, 3] }
+{ "type": "game", "action": "set_palette", "needed": "ff8c00" }
+{ "type": "game", "action": "node_config", "node": 2, "key": 6, "value": 96 }
 ```
+
+`settings` is the schema the admin rail renders itself from: one descriptor per
+tunable, carrying the range the server also enforces. Pair it with `tunables`,
+which holds the current value under the same key. Adding a knob is one entry in
+`config::SETTINGS` and no client change at all — and because both ends read the
+same table, the UI cannot offer a value the server would refuse. Values outside a
+declared range are **clamped**, not rejected; an unknown key is `invalid_args`.
+
+`node_config` is a pass-through to the AVR's own EEPROM keys (see the config-key
+table in `docs/uart-api.md`) — sensor thresholds, debounce, LED brightness and
+per-quadrant orientation. Each write commits EEPROM (~240 ms), so it is one key
+per call and human-driven, never per frame.
 
 Rejections reuse the `error` envelope (`unauthorized`, `invalid_args`); a success
 is acknowledged by the next `game.state`.
@@ -273,10 +296,26 @@ to occupancy interpretation and to lighting together.
 | `DEVICE_TOKEN` | no | If set, device upgrades to `/board` must carry `Authorization: Bearer <token>`. |
 | `POSITIONS_PATH` | no | Puzzle deck, JSON array or JSON lines, each record needing only `fen`. Falls back to the deck compiled into the binary. |
 | `STOCKFISH_PATH` | no | Engine binary, default `/usr/games/stockfish` with a `PATH` lookup behind it. Eval falls back to a material count, labelled. |
-| `GAME_OPEN_CONTROLS` | no | `1` lets unauthenticated clients drive the player-facing game actions. |
-| `GAME_SNAPSHOT_PATH` | no | Where the game is persisted on every phase change, default `/tmp/arcade-game.json`, so a restart mid-demo is survivable. |
-| `MAX_PLY` | no | Plies per game, default `10`. |
-| `SETTLE_MS`, `AUTOSTART_STABLE_MS`, `UNKNOWN_TOLERANCE`, `TIER3_MAX_DISTANCE`, `TIER3_MARGIN`, `DRAW_BAND_CP`, `COUNTDOWN_MS` | no | Detection tunables. All are also live-editable via `set_tunables`, which is the point — none of their right values are knowable before the hardware is on the table. |
+| `GAME_OPEN_CONTROLS` | no | `1` lets unauthenticated clients drive the player-facing game actions. Also live-settable as `open_controls`. |
+| `GAME_SNAPSHOT_PATH` | no | Where the game is persisted, default `/tmp/arcade-game.json`, so a restart mid-demo is survivable. Written on every ply. |
+| `CONFIG_PATH` | no | Where the **venue profile** is persisted, default `/srv/venue.json`. Deliberately not `/tmp`: on a container platform `/tmp` does not survive the container being replaced, which is exactly the event this file exists to survive. |
+| `MAX_PLY` | no | Plies per game, default `10`. Also live-settable; takes effect on the next new game. |
+| `SETTLE_MS`, `AUTOSTART_STABLE_MS`, `UNKNOWN_TOLERANCE`, `TIER3_*`, `AUTO_MASK_STREAK`, `DRAW_BAND_CP`, `COUNTDOWN_MS`, `AUTOPILOT_INTERVAL_MS` | no | Boot defaults for the tunables. All are live-editable via `set_config`, which is the point — none of their right values are knowable before the hardware is on the table. On a container platform an environment variable means a restart, so treat these as build defaults and the admin rail as the actual control. |
+
+### The venue profile
+
+Ten minutes of setup at the venue — binding the board, squaring up its mounting,
+masking whichever sensors lie, assigning the bar map, choosing a detect mode — is
+the expensive artifact of the evening; the five-minute puzzle can simply be
+replayed. So all of it is written to `CONFIG_PATH` on every change and read back
+at boot *before* the game snapshot, and the tunables and palette ride along with
+it. Auto-masks are deliberately excluded: they are per-game evidence about a
+position that no longer exists, not calibration.
+
+The file is versioned. A profile written by a different build is discarded with a
+log line rather than half-applied, and any value outside the range the server
+currently advertises is clamped on the way in — a hand-edited file cannot smuggle
+in something the wire would refuse.
 
 ## Quadrant mapping (bring-up assumption)
 

@@ -125,7 +125,8 @@
 	header {
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		flex-wrap: wrap;
+		gap: 6px 10px;
 		padding: 9px 12px;
 		border-bottom: 1px solid var(--color-line-soft);
 	}
@@ -142,6 +143,15 @@
 		padding: 2px 4px;
 		cursor: pointer;
 		color: var(--color-fg-ghost);
+	}
+	@media (pointer: coarse) {
+		.tab {
+			padding: 8px 6px;
+		}
+		.trace {
+			height: 30px;
+			padding: 0 12px;
+		}
 	}
 	.tab.on {
 		color: var(--color-fg);
@@ -297,5 +307,26 @@
 	.stream::-webkit-scrollbar-thumb {
 		background: var(--color-line);
 		border-radius: 4px;
+	}
+
+	/* On a narrow screen an ellipsis eats the half of the line that says what
+	   went wrong. The log keeps its column alignment and scrolls sideways
+	   instead — a trace you can reach beats a trace that fits. */
+	@media (max-width: 720px) {
+		.stream {
+			overflow-x: auto;
+			overscroll-behavior-x: contain;
+		}
+		.row {
+			width: max-content;
+			min-width: 100%;
+		}
+		.row .txt {
+			overflow: visible;
+			text-overflow: clip;
+		}
+		.count {
+			margin-left: 0;
+		}
 	}
 </style>

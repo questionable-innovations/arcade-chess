@@ -39,6 +39,14 @@
 
 :root {
 	color-scheme: dark;
+
+	/* Resolved once here so chrome can pad itself out from under a notch or a
+	   home indicator without repeating the env() dance. Zero on every device
+	   that has neither. */
+	--safe-t: env(safe-area-inset-top, 0px);
+	--safe-r: env(safe-area-inset-right, 0px);
+	--safe-b: env(safe-area-inset-bottom, 0px);
+	--safe-l: env(safe-area-inset-left, 0px);
 }
 
 html,
@@ -46,8 +54,17 @@ body {
 	height: 100%;
 }
 
+html {
+	/* iOS inflates text in landscape otherwise, which shears every readout that
+	   was sized to fit a card. */
+	-webkit-text-size-adjust: 100%;
+}
+
 body {
 	margin: 0;
+	min-height: 100dvh;
+	/* A drag that misses a piece must not rubber-band the page behind it. */
+	overscroll-behavior-y: contain;
 	background:
 		radial-gradient(120% 90% at 50% -10%, #121517 0%, transparent 60%),
 		radial-gradient(140% 120% at 50% 120%, #0d1012 0%, transparent 55%), var(--color-void);
@@ -72,6 +89,25 @@ body::before {
 .tnum {
 	font-variant-numeric: tabular-nums;
 }
+
+/* ── Touch ───────────────────────────────────────────────────────────────────
+   The operator drives this from a phone at the venue, so touch is a first-class
+   input rather than a degraded mouse. Three things follow from that. */
+
+/* No 300 ms double-tap delay, and no grey flash on every control. */
+a,
+button,
+label,
+select,
+summary,
+input[type='range'] {
+	touch-action: manipulation;
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* The touch-target and hover overrides live at the very bottom of this file.
+   A media query adds no specificity, so they only beat the desktop rules they
+   restate by coming last. */
 
 /* ── Instrument chrome ───────────────────────────────────────────────────────
    The debug rail is three sibling cards; the shell and the chip control they
@@ -120,9 +156,6 @@ body::before {
 		border-color 0.15s ease,
 		background 0.15s ease;
 }
-.chip:hover:not(:disabled) {
-	color: var(--color-fg);
-}
 .chip:disabled {
 	opacity: 0.4;
 	cursor: not-allowed;
@@ -164,4 +197,37 @@ body::before {
 	margin: 9px 0 0;
 	font-size: 10.5px;
 	color: var(--color-fg-ghost);
+}
+
+/* ── Touch overrides ─────────────────────────────────────────────────────────
+   Last in the file on purpose: these restate properties the rules above already
+   set, and a media query contributes nothing to specificity. */
+
+/* A tapped control keeps :hover until the next tap lands elsewhere, so every
+   hover affordance in this app is written as `@media (hover: hover)`. This is
+   the guard for the shared ones. */
+@media (hover: hover) {
+	.chip:hover:not(:disabled) {
+		color: var(--color-fg);
+	}
+}
+
+@media (pointer: coarse) {
+	/* Under 16px, focusing a field zooms the page on iOS and the operator has to
+	   pinch back out mid-demo. */
+	input,
+	select,
+	textarea {
+		font-size: 16px;
+	}
+	input[type='range'] {
+		height: 32px;
+	}
+	/* The instrument chips are drawn small on purpose and there are dozens of
+	   them in the rail. A finger still needs something to land on. */
+	.chip {
+		height: 32px;
+		padding: 0 12px;
+		font-size: 11.5px;
+	}
 }

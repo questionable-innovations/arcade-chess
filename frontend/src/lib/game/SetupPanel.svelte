@@ -94,7 +94,7 @@
 
 <style>
 	.setup {
-		min-width: 260px;
+		min-width: min(260px, 100%);
 	}
 	.hint {
 		margin: 0 0 10px;
@@ -147,6 +147,7 @@
 
 	.start {
 		width: 100%;
+		min-height: 48px;
 		margin-top: 8px;
 		padding: 12px;
 		display: flex;

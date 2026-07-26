@@ -208,11 +208,23 @@ class ScriptedBoard:
         await result("applied")
 
 
+# Every wait in this harness brackets the server's settle window. Hard-coding
+# them to the 700 ms default meant the one change most likely to be made at a
+# venue - "raise settle_ms, the players hover" - broke the rehearsal that
+# exists to validate exactly that change. Scale instead.
+DEFAULT_SETTLE_MS = 700
+
+
 class Rehearsal:
     def __init__(self, args) -> None:
         self.args = args
+        self.scale = max(1.0, args.settle_ms / DEFAULT_SETTLE_MS)
         self.state: dict = {}
         self.checks: list[tuple[bool, str, str]] = []
+
+    def pause(self, seconds: float) -> float:
+        """A wait that tracks the configured settle window."""
+        return seconds * self.scale
 
     def check(self, ok: bool, what: str, detail: str = "") -> bool:
         self.checks.append((ok, what, detail))
@@ -261,12 +273,18 @@ class Rehearsal:
                 await client_socket.send(
                     json.dumps({"type": "game", "action": action, **kwargs})
                 )
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(self.pause(0.3))
 
             await client_socket.send(
                 json.dumps({"type": "auth", "password": self.args.password})
             )
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(self.pause(0.4))
+            # Put the server on the timings this run is bracketing, so the
+            # harness and the thing it is measuring cannot disagree.
+            await solo_game("set_config", key="settle_ms", value=self.args.settle_ms)
+            await solo_game(
+                "set_config", key="autostart_stable_ms", value=self.args.autostart_ms
+            )
             # Masks, rotation and detect mode deliberately outlive a game — they
             # are calibration of the venue, not state of the round — so a
             # repeatable rehearsal has to undo them before it measures anything.
@@ -332,19 +350,19 @@ class Rehearsal:
                 await client_socket.send(
                     json.dumps({"type": "game", "action": action, **kwargs})
                 )
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(self.pause(0.3))
 
             await client_socket.send(
                 json.dumps({"type": "auth", "password": self.args.password})
             )
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(self.pause(0.4))
             # A rehearsal is only worth running from a known start. Masks and
             # rotation deliberately outlive a game — they are calibration of the
             # venue, not state of the round — so they have to be undone here.
             await game("abort")
             await game("bind_device", device_id=self.args.device_id)
             await board.snapshot()
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(self.pause(0.4))
 
             try:
                 await self.act_one(board, game)
@@ -411,7 +429,7 @@ class Rehearsal:
         target = fen_squares(fen)[0]
         board.state[target] = "uncertain"
         await board.changed(target, "uncertain")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(self.pause(0.5))
         held = self.state.get("phase") in ("setup", "countdown")
         await board.place(target)
         self.check(held, "a hand over the board does not fire the start",
@@ -427,7 +445,7 @@ class Rehearsal:
         await board.lift(occupied[0])
         await asyncio.sleep(0.1)
         await board.place(occupied[0], flip=True)
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(self.pause(1.2))
         self.check(
             self.state.get("ply") == before and self.state.get("phase") == "playing",
             "lifting a piece and putting it back the wrong way round is a no-op",
@@ -498,13 +516,13 @@ class Rehearsal:
         await self.wait(lambda s: s.get("phase") == "playing", "playing", 12)
         if self.state.get("phase") != "playing":
             await game("start")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.pause(0.5))
 
         # "quadrant offline mid-game": its squares go unknown and are excluded
         # from every comparison, and the drop is named.
         board.node_online[3] = False
         await board.snapshot()
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(self.pause(0.8))
         self.check(
             "node3_offline" in self.state.get("degraded", []),
             "a quadrant dropping out is named in `degraded`",
@@ -517,7 +535,7 @@ class Rehearsal:
         )
         board.node_online[3] = True
         await board.snapshot()
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(self.pause(0.6))
         self.check(
             "node3_offline" not in self.state.get("degraded", []),
             "and detection re-arms when it comes back",
@@ -531,7 +549,7 @@ class Rehearsal:
             uci = legal[0]
             ply = self.state.get("ply")
             await board.move(square_index(uci[0:2]), square_index(uci[2:4]))
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.pause(0.5))
             await board.snapshot()
             healed = await self.wait(lambda s: s.get("ply", 0) > ply, "healed ply", 6)
             self.check(healed, "a sequence gap heals from the next snapshot",
@@ -542,14 +560,14 @@ class Rehearsal:
         # checks below are measuring.
         board.skip_events = 0
         await board.snapshot()
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(self.pause(0.4))
 
         # "one sensor stuck confidently wrong": mask it in one click and tier 1
         # resumes on the remaining known squares.
         empty = next(i for i in range(SQUARES) if board.state[i] == "empty")
         board.stuck[empty] = "positive"
         await board.snapshot()
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(self.pause(0.6))
         await game("mask_square", square=empty, masked=True)
         self.check(
             empty in self.state["detect"]["masked"],
@@ -575,7 +593,7 @@ class Rehearsal:
         occupied = [i for i in range(SQUARES) if board.state[i] != "empty"]
         await board.lift(occupied[0])
         await board.lift(occupied[1])
-        await asyncio.sleep(1.6)
+        await asyncio.sleep(self.pause(1.6))
         self.check(
             self.state.get("ply") == ply
             and self.state.get("phase") == "awaiting_choice"
@@ -630,7 +648,7 @@ class Rehearsal:
             uci = legal[0]
             ply = self.state.get("ply")
             await board.move(square_index(uci[0:2]), square_index(uci[2:4]))
-            await asyncio.sleep(1.4)
+            await asyncio.sleep(self.pause(1.4))
             proposed = self.state.get("choice") or {}
             self.check(
                 self.state.get("ply") == ply and proposed.get("kind") == "suggest",
@@ -665,7 +683,7 @@ class Rehearsal:
         await game("new_game")
         await self.wait(lambda s: s.get("phase") == "setup", "setup")
         await game("start")
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(self.pause(0.4))
         self.check(
             self.state.get("phase") == "playing",
             "Start always works, whatever the board says",
@@ -696,6 +714,18 @@ def main() -> int:
     parser.add_argument("--password", default="rehearse")
     parser.add_argument("--device-id", default="arcade-chess-rehearsal")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--settle-ms",
+        type=int,
+        default=DEFAULT_SETTLE_MS,
+        help="settle window to rehearse against; waits scale to match",
+    )
+    parser.add_argument(
+        "--autostart-ms",
+        type=int,
+        default=1500,
+        help="auto-start stability hold to rehearse against",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     random.seed(args.seed)

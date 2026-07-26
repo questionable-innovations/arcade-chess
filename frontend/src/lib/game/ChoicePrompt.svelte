@@ -49,6 +49,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
+		/* Sits directly under the board and lines up with it, at every width. */
+		width: 100%;
+		max-width: 620px;
+		max-width: min(78dvh, 620px);
 		padding: 16px 18px;
 		border-radius: 12px;
 		background: color-mix(in srgb, var(--color-probe) 12%, var(--color-surface));
@@ -80,6 +84,8 @@
 		flex-direction: column;
 		gap: 2px;
 		align-items: center;
+		min-height: 56px;
+		justify-content: center;
 		padding: 14px 12px;
 		font-family: inherit;
 		color: var(--color-fg);
@@ -88,8 +94,10 @@
 		border-radius: 10px;
 		cursor: pointer;
 	}
-	.option:hover:not(:disabled) {
-		border-color: var(--color-probe);
+	@media (hover: hover) {
+		.option:hover:not(:disabled) {
+			border-color: var(--color-probe);
+		}
 	}
 	.option:disabled {
 		opacity: 0.4;

@@ -42,7 +42,7 @@ Two decks are committed, and the distinction matters:
 | File | Role |
 | --- | --- |
 | `positions.json` | The mined deck. Copied to `/srv/positions.json` in the image; this is what gets dealt. |
-| `positions.fallback.json` | Eight hand-checked endgames, `include_str!`d into the binary. Dealt only if the mined deck is missing, empty or malformed — which shows as `positions_embedded` in `degraded`. |
+| `positions.fallback.json` | Eight hand-checked endgames, `include_str!`d into the binary. Dealt only if the mined deck is missing, empty or malformed — which shows as `positions_fallback` in `degraded`. |
 
 CapRover builds from git, so the deck reaches production by being committed.
 Regenerate it from the curated `.arcpos` (also committed, at

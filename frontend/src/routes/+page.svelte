@@ -188,6 +188,7 @@
 <style>
 	.app {
 		min-height: 100vh;
+		min-height: 100dvh;
 		display: grid;
 		grid-template-rows: auto 1fr;
 		position: relative;
@@ -198,18 +199,30 @@
 	.stage {
 		display: grid;
 		place-items: center;
-		padding: clamp(16px, 4vw, 44px);
+		padding: clamp(14px, 4vw, 44px);
+		padding-right: calc(clamp(14px, 4vw, 44px) + var(--safe-r));
+		padding-bottom: calc(clamp(14px, 4vw, 44px) + var(--safe-b));
+		padding-left: calc(clamp(14px, 4vw, 44px) + var(--safe-l));
 	}
+	/* The board is square, so it is bounded by whichever of the two axes runs
+	   out first: the column on a phone in portrait, the viewport height on
+	   anything landscape. */
 	.board-slot {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		gap: 16px;
+		width: 100%;
+		max-width: min(74vh, 100%);
+		max-width: min(74dvh, 100%);
 	}
 	.caption {
 		display: flex;
 		align-items: center;
-		gap: 9px;
+		justify-content: center;
+		flex-wrap: wrap;
+		gap: 4px 9px;
+		text-align: center;
 		font-family: var(--font-mono);
 		font-size: 12px;
 		color: var(--color-fg-faint);
@@ -251,17 +264,39 @@
 		overflow-y: auto;
 	}
 
+	/* Below the two-column threshold the dashboard becomes one scrolling column.
+	   Nested scrollers are the thing that makes an instrument panel unusable on
+	   a phone — you flick the page and move a card instead — so the rail hands
+	   its overflow back to the document. */
 	@media (max-width: 1080px) {
 		.stage.debug {
-			grid-template-columns: 1fr;
+			grid-template-columns: minmax(0, 1fr);
 			grid-template-rows: auto auto auto;
 			grid-template-areas:
 				'board'
 				'rail'
 				'console';
 		}
+		.stage.debug .board-slot {
+			justify-self: center;
+		}
+		.rail {
+			overflow-y: visible;
+		}
 		.stage.debug .console-slot {
-			height: 260px;
+			height: min(50dvh, 260px);
+		}
+	}
+
+	@media (max-width: 560px) {
+		.stage.debug {
+			gap: 14px;
+		}
+		.board-slot {
+			gap: 12px;
+		}
+		.caption {
+			font-size: 11px;
 		}
 	}
 </style>

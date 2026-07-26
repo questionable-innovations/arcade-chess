@@ -246,7 +246,7 @@ mod tests {
 
     /// The committed mined deck is what production actually deals, and it only
     /// reaches production through git — so a bad regeneration should fail here
-    /// rather than quietly turn into a `positions_embedded` chip on the night.
+    /// rather than quietly turn into a `positions_fallback` chip on the night.
     /// Compiled into the test binary only; the release build reads it from
     /// `POSITIONS_PATH`.
     #[test]
@@ -305,7 +305,7 @@ mod tests {
     /// format tops out at sixteen pieces. Every size it can emit has to survive
     /// `validate` — a ceiling left behind at eight rejects the whole deck, and
     /// because that failure is non-fatal by design it surfaces only as a
-    /// `positions_embedded` chip rather than as anything that stops a deploy.
+    /// `positions_fallback` chip rather than as anything that stops a deploy.
     #[test]
     fn the_full_mined_piece_range_validates() {
         for fen in [

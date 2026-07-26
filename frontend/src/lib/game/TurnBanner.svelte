@@ -109,4 +109,26 @@
 		letter-spacing: 0.03em;
 		color: var(--color-warn);
 	}
+
+	/* Landscape on a phone: every line this banner spends is a rank of board
+	   pushed off the screen. Still the loudest thing on the page, just smaller. */
+	@media (orientation: landscape) and (max-height: 560px) {
+		.banner {
+			gap: 1px;
+		}
+		h1 {
+			font-size: 21px;
+		}
+		.dot {
+			width: 12px;
+			height: 12px;
+		}
+		.sub {
+			font-size: 11px;
+		}
+		.degraded {
+			margin-top: 0;
+			font-size: 10px;
+		}
+	}
 </style>

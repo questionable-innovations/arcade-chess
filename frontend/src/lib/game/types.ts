@@ -9,7 +9,27 @@ export type Phase =
 	'idle' | 'setup' | 'countdown' | 'playing' | 'awaiting_choice' | 'scoring' | 'finished';
 
 export type DetectMode = 'auto' | 'suggest' | 'off';
-export type EvalSourceName = 'stockfish' | 'material' | 'admin';
+/// `unknown` means no evaluation has run yet — distinct from `material`, so a
+/// bar that has never been given a number does not wear a badge claiming one
+/// was counted.
+export type EvalSourceName = 'stockfish' | 'material' | 'admin' | 'unknown';
+
+export type PaintName = 'alert' | 'needed' | 'focus' | 'sweep' | 'bar_white' | 'bar_black';
+
+/// One self-describing tunable, as the server advertises it.
+export interface Setting {
+	key: string;
+	group: string;
+	label: string;
+	kind: 'int' | 'float' | 'bool';
+	min: number;
+	max: number;
+	step: number;
+	unit: string;
+	/// False for settings that only take effect on the next game.
+	live: boolean;
+	help: string;
+}
 
 export interface GameMove {
 	uci: string;
@@ -76,19 +96,22 @@ export interface GameState {
 		swing: number;
 		reason: string;
 	};
-	tunables: {
-		settle_ms: number;
-		autostart_stable_ms: number;
-		unknown_tolerance: number;
-		tier3_max_distance: number;
-		tier3_margin: number;
-		draw_band_cp: number;
-		countdown_ms: number;
-	};
+	/// Current values, keyed exactly as `settings` names them. Deliberately open:
+	/// the rail pairs this with `settings` rather than knowing any field names,
+	/// so adding a tunable is one line in the server's `config::SETTINGS` and no
+	/// frontend change at all.
+	tunables: Record<string, number | boolean>;
+	/// The schema the rail renders itself from. Because the server ships the
+	/// ranges it also enforces, the UI structurally cannot offer a value that
+	/// would be refused.
+	settings: Setting[];
+	palette: Record<PaintName, string>;
 	lighting: {
 		squares: string;
 		bars_supported: boolean;
 		bar_map: { node: number; strip: string; reversed: boolean }[][];
+		eval_sides: number[];
+		turn_sides: number[];
 		colours_neutralised: boolean;
 	};
 	autopilot: { interval_ms: number } | null;
@@ -123,23 +146,28 @@ export const IDLE_GAME: GameState = {
 		mate: null,
 		win_prob: 0.5,
 		status: 'pending',
-		source: 'material',
+		source: 'unknown',
 		depth: 0,
 		start_cp: 0
 	},
-	tunables: {
-		settle_ms: 700,
-		autostart_stable_ms: 1500,
-		unknown_tolerance: 0,
-		tier3_max_distance: 1,
-		tier3_margin: 1,
-		draw_band_cp: 40,
-		countdown_ms: 3000
+	// Empty until the first broadcast. The server is the only place defaults
+	// live now — keeping a second copy here is how the two drift.
+	tunables: {},
+	settings: [],
+	palette: {
+		alert: 'd02020',
+		needed: 'ff8c00',
+		focus: '2a6ad0',
+		sweep: 'f0f0f0',
+		bar_white: 'e8e8e8',
+		bar_black: '303452'
 	},
 	lighting: {
 		squares: 'override',
 		bars_supported: true,
 		bar_map: [],
+		eval_sides: [0, 2],
+		turn_sides: [1, 3],
 		colours_neutralised: false
 	},
 	autopilot: null,
@@ -254,6 +282,9 @@ export function degradedLabel(code: string): string {
 		bars_unsupported: 'edge bars unsupported',
 		positions_fallback: 'fallback puzzle deck',
 		restored_after_restart: 'restored after a restart',
+		verdict_incomparable: 'verdict withheld — the two evals used different engines',
+		stream_gap: 'sensor stream gap — waiting for a fresh snapshot',
+		config_not_persisted: 'settings will not survive a restart',
 		detect_suggest: 'detection: confirm each move',
 		detect_off: 'detection off — click to move'
 	};

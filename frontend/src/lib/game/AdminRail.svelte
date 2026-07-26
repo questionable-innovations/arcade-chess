@@ -6,7 +6,7 @@
 	// right values are knowable until the hardware is on the table and no demo
 	// survives a redeploy to fix a constant.
 
-	import { squareName, type DetectMode, type GameState } from './types';
+	import { squareName, type DetectMode, type GameState, type Setting } from './types';
 
 	interface Props {
 		game: GameState;
@@ -32,11 +32,66 @@
 	let barStrip = $state<'a' | 'b'>('a');
 	let barPixel = $state(-1);
 
+	// The AVR's own EEPROM keys. The transport always existed; only a way to
+	// reach it from the web did not, which left the most venue-dependent values
+	// in the whole system — sensor thresholds, LED brightness — behind a USB
+	// cable and a crouch.
+	const NODE_KEYS = [
+		{ key: 1, label: 'enter threshold', min: 10, max: 400 },
+		{ key: 2, label: 'exit threshold', min: 10, max: 400 },
+		{ key: 3, label: 'debounce scans', min: 1, max: 10 },
+		{ key: 6, label: 'LED brightness', min: 0, max: 255 },
+		{ key: 9, label: 'orientation', min: 0, max: 7 }
+	];
+	let nodeTarget = $state(0);
+	let nodeKey = $state(1);
+	let nodeValue = $state(70);
+	const nodeSpec = $derived(NODE_KEYS.find((k) => k.key === nodeKey) ?? NODE_KEYS[0]);
+
 	const modes: DetectMode[] = ['auto', 'suggest', 'off'];
 	const tun = $derived(game.tunables);
 
+	// The rail renders itself from the schema the server ships, so it can never
+	// offer a value the server would clamp, adding a knob is one line of Rust,
+	// and the defaults stop existing in triplicate.
+	const groups = $derived.by(() => {
+		// Scratch, not state: built fresh on every run and returned as an array,
+		// so there is nothing here for a SvelteMap to make reactive.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const out = new Map<string, Setting[]>();
+		for (const spec of game.settings) {
+			const list = out.get(spec.group) ?? [];
+			list.push(spec);
+			out.set(spec.group, list);
+		}
+		return [...out];
+	});
+
+	// A slider bound straight to the broadcast value fights the operator's thumb:
+	// during setup the server is dirty on every tick, so each incoming state
+	// re-applies its own value to the DOM node mid-drag. Track locally while
+	// dragging, and commit on release.
+	let dragging = $state<Record<string, number>>({});
+
+	function shown(spec: Setting): number {
+		const live = dragging[spec.key];
+		if (live !== undefined) return live;
+		return Number(tun[spec.key] ?? spec.min);
+	}
+
+	function format(spec: Setting, value: number): string {
+		const text = spec.kind === 'float' ? value.toFixed(2).replace(/\.?0+$/, '') : String(value);
+		return `${text}${spec.unit}`;
+	}
+
 	function tune(key: string, value: number) {
-		send('set_tunables', { [key]: value });
+		send('set_config', { key, value });
+	}
+
+	function commit(spec: Setting, value: number) {
+		delete dragging[spec.key];
+		dragging = { ...dragging };
+		tune(spec.key, value);
 	}
 </script>
 
@@ -130,61 +185,86 @@
 					{/each}
 				</div>
 
-				<label class="slider">
-					<span>settle {tun.settle_ms} ms</span>
+				{#each groups as [group, specs] (group)}
+					<p class="grouphead">{group}</p>
+					{#each specs as spec (spec.key)}
+						{#if spec.kind === 'bool'}
+							<label class="toggle" title={spec.help}>
+								<input
+									type="checkbox"
+									checked={Boolean(tun[spec.key])}
+									onchange={(e) =>
+										send('set_config', { key: spec.key, value: e.currentTarget.checked })}
+								/>
+								<span
+									>{spec.label}{#if !spec.live}<em class="next"> next game</em>{/if}</span
+								>
+							</label>
+						{:else}
+							<label class="slider" title={spec.help}>
+								<span>
+									{spec.label}
+									<b class="tnum">{format(spec, shown(spec))}</b>
+									{#if !spec.live}<em class="next">next game</em>{/if}
+								</span>
+								<input
+									type="range"
+									min={spec.min}
+									max={spec.max}
+									step={spec.step}
+									value={shown(spec)}
+									oninput={(e) =>
+										(dragging = { ...dragging, [spec.key]: Number(e.currentTarget.value) })}
+									onchange={(e) => commit(spec, Number(e.currentTarget.value))}
+								/>
+							</label>
+						{/if}
+					{/each}
+				{/each}
+			</section>
+
+			<section class="card">
+				<div class="cardhead">
+					<h3>Quadrant hardware</h3>
+					<span class="stat">EEPROM</span>
+				</div>
+				<p class="hint">
+					Written straight to the AVR. Each commit costs ~240 ms of EEPROM, so change one at a time.
+				</p>
+				<div class="row">
+					{#each [0, 1, 2, 3] as node (node)}
+						<button
+							class="chip"
+							class:active={nodeTarget === node}
+							onclick={() => (nodeTarget = node)}
+						>
+							node {node}
+						</button>
+					{/each}
+				</div>
+				<div class="row">
+					<select bind:value={nodeKey} class="grow">
+						{#each NODE_KEYS as k (k.key)}
+							<option value={k.key}>{k.label}</option>
+						{/each}
+					</select>
 					<input
-						type="range"
-						min="200"
-						max="2000"
-						step="50"
-						value={tun.settle_ms}
-						oninput={(e) => tune('settle_ms', Number(e.currentTarget.value))}
+						type="number"
+						class="num"
+						min={nodeSpec.min}
+						max={nodeSpec.max}
+						bind:value={nodeValue}
 					/>
-				</label>
-				<label class="slider">
-					<span>auto-start hold {tun.autostart_stable_ms} ms</span>
-					<input
-						type="range"
-						min="500"
-						max="5000"
-						step="100"
-						value={tun.autostart_stable_ms}
-						oninput={(e) => tune('autostart_stable_ms', Number(e.currentTarget.value))}
-					/>
-				</label>
-				<label class="slider">
-					<span>tier-3 max distance {tun.tier3_max_distance.toFixed(1)}</span>
-					<input
-						type="range"
-						min="0"
-						max="4"
-						step="0.5"
-						value={tun.tier3_max_distance}
-						oninput={(e) => tune('tier3_max_distance', Number(e.currentTarget.value))}
-					/>
-				</label>
-				<label class="slider">
-					<span>tier-3 margin {tun.tier3_margin.toFixed(1)}</span>
-					<input
-						type="range"
-						min="0"
-						max="4"
-						step="0.5"
-						value={tun.tier3_margin}
-						oninput={(e) => tune('tier3_margin', Number(e.currentTarget.value))}
-					/>
-				</label>
-				<label class="slider">
-					<span>unknown tolerance {tun.unknown_tolerance}</span>
-					<input
-						type="range"
-						min="0"
-						max="8"
-						step="1"
-						value={tun.unknown_tolerance}
-						oninput={(e) => tune('unknown_tolerance', Number(e.currentTarget.value))}
-					/>
-				</label>
+					<button
+						class="chip"
+						onclick={() =>
+							send('node_config', {
+								node: nodeTarget,
+								key: nodeKey,
+								value: Math.max(nodeSpec.min, Math.min(nodeSpec.max, nodeValue))
+							})}>write</button
+					>
+				</div>
 			</section>
 
 			<section class="card">
@@ -325,7 +405,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
-		width: 320px;
+		width: min(320px, 100%);
 		max-height: 100%;
 		overflow-y: auto;
 	}
@@ -396,6 +476,40 @@
 		font-size: 10px;
 		color: var(--color-fg-faint);
 	}
+	.grouphead {
+		margin: 12px 0 2px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--color-fg-faint);
+	}
+	.grouphead:first-of-type {
+		margin-top: 4px;
+	}
+	.next {
+		font-style: normal;
+		font-size: 9px;
+		padding: 1px 5px;
+		margin-left: 6px;
+		border-radius: 999px;
+		border: 1px solid var(--color-line);
+		color: var(--color-fg-faint);
+	}
+	.toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 6px 0;
+		font-size: 12px;
+		color: var(--color-fg-dim);
+		cursor: pointer;
+	}
+	.slider b {
+		float: right;
+		color: var(--color-fg);
+		font-weight: 500;
+	}
 	.slider {
 		display: flex;
 		flex-direction: column;
@@ -408,5 +522,82 @@
 	.slider input {
 		width: 100%;
 		padding: 0;
+	}
+
+	/* Stacked under the board rather than beside it: full width, and scrolling
+	   with the page instead of inside a box the thumb has to find first. The
+	   header sticks so `hide` is always one reach away — this rail is long, and
+	   burying the way to close it is what makes a phone operator scroll past
+	   the board to get back to the game. */
+	@media (max-width: 1180px) {
+		.rail {
+			width: 100%;
+			max-height: none;
+			overflow-y: visible;
+		}
+		.railhead {
+			position: sticky;
+			top: 0;
+			z-index: 5;
+			padding: 6px 0;
+			margin: -6px 0 0;
+			background: linear-gradient(var(--color-void) 70%, transparent);
+		}
+	}
+
+	@media (max-width: 700px) {
+		/* Every control here is aimed at with a thumb, not a cursor. */
+		.row {
+			gap: 8px;
+			margin-bottom: 10px;
+		}
+		input,
+		select {
+			padding: 8px 9px;
+		}
+		input.num {
+			width: 92px;
+		}
+		.mini {
+			gap: 6px;
+		}
+		.mini select {
+			min-height: 34px;
+		}
+		.slider {
+			gap: 5px;
+			margin-bottom: 12px;
+			font-size: 11px;
+		}
+		.grouphead {
+			margin-top: 14px;
+		}
+		form {
+			flex-wrap: wrap;
+			gap: 8px;
+		}
+		form input {
+			flex: 1 1 100%;
+		}
+	}
+
+	/* Touch, not width: a tablet in landscape is still driven with a thumb. A
+	   default checkbox is a 13px target — the label already extends the hit
+	   area, but the box is where the thumb actually aims. */
+	@media (pointer: coarse) {
+		.toggle {
+			min-height: 40px;
+			margin: 0;
+			font-size: 13px;
+		}
+		.toggle input[type='checkbox'] {
+			flex: none;
+			width: 22px;
+			height: 22px;
+			padding: 0;
+		}
+		.mini select {
+			min-height: 34px;
+		}
 	}
 </style>

@@ -261,6 +261,12 @@ fn handle_event(
         state.send_game(crate::game::GameInput::Device {
             device_id: device_id.to_string(),
             event: event.clone(),
+            // The delta stream tore. The game cannot see that from the event
+            // itself, and applying deltas across a hole leaves the observer with
+            // a torn view — "lifted, but not yet landed" is an exact Tier-1
+            // match for a capture on the same line, and commits the wrong move
+            // with full confidence.
+            gap: need_snapshot,
         });
     }
 

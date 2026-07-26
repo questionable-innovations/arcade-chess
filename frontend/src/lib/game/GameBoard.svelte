@@ -389,18 +389,31 @@
 				// here, and those report a detail of 0.
 				if (e.detail === 0) keyActivate(cell.square);
 			}}
-			onmouseenter={() => (hovered = cell.square)}
-			onmouseleave={() => (hovered = null)}
+			onpointerenter={(e) => {
+				// A tap leaves a synthetic hover behind that never clears, so the
+				// hover affordances are mouse-only by construction.
+				if (e.pointerType === 'mouse') hovered = cell.square;
+			}}
+			onpointerleave={(e) => {
+				if (e.pointerType === 'mouse') hovered = null;
+			}}
 		></button>
 	{/each}
 </div>
 
 <style>
+	/* Bounded by whichever runs out first: the column it sits in, or the height
+	   left over for it. `vmin` used to do both jobs at once, which cost a phone
+	   in portrait a fifth of its width for no reason — there, the column is the
+	   only constraint that matters. `dvh` so a retracting URL bar doesn't leave
+	   the board sized for a viewport that no longer exists. */
 	.board {
 		position: relative;
-		width: min(78vmin, 620px);
+		width: min(100%, 78vh, 620px);
+		width: min(100%, 78dvh, 620px);
 		aspect-ratio: 1;
 		user-select: none;
+		-webkit-user-select: none;
 		border-radius: 10px;
 		overflow: hidden;
 		border: 1px solid var(--color-line);
@@ -608,10 +621,12 @@
 	.hit.point {
 		cursor: pointer;
 	}
-	/* While the board takes input it owns touch gestures, so a drag that misses
-	   a piece never scrolls the page out from under the move. When it is locked,
-	   touches pass straight through to the scroller. */
-	.board.live .hit {
+	/* A square that can start a move owns touch gestures, so dragging a piece
+	   never scrolls the page out from under the move. Everywhere else — empty
+	   squares, the opponent's pieces, the whole board when it is locked — the
+	   touch passes through to the scroller. On a phone the board is most of the
+	   viewport, and claiming all of it would leave nothing to scroll by. */
+	.board.live .hit.grab {
 		touch-action: none;
 	}
 	.board.grabbing .hit {
@@ -620,6 +635,15 @@
 	.hit:focus-visible {
 		outline: 2px solid var(--color-probe);
 		outline-offset: -2px;
+	}
+
+	/* A phone on its side has height to spare in no direction. 78dvh leaves the
+	   board hanging below the fold once the banner has had its say, so here the
+	   budget is stated as "whatever the chrome did not take" instead. */
+	@media (orientation: landscape) and (max-height: 560px) {
+		.board {
+			width: min(100%, calc(100dvh - 116px), 620px);
+		}
 	}
 
 	@media (prefers-reduced-motion: reduce) {

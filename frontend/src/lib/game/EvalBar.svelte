@@ -28,9 +28,12 @@
 		<span
 			class="source"
 			class:manual={game.eval.source === 'admin'}
-			class:soft={game.eval.source === 'material'}
+			class:soft={game.eval.source === 'material' || game.eval.source === 'unknown'}
 		>
-			{game.eval.source}
+			<!-- `unknown` is not a source, it is the absence of one: nothing has
+			     been evaluated yet, and saying "material" here would put a badge on
+			     a number that was never counted. -->
+			{game.eval.source === 'unknown' ? 'no eval yet' : game.eval.source}
 		</span>
 	</div>
 	<div class="bar" role="img" aria-label={`evaluation ${label}, white ${fill} of ${SEGMENTS}`}>
@@ -54,7 +57,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 7px;
-		min-width: 200px;
+		min-width: min(200px, 100%);
 	}
 	.head {
 		display: flex;

@@ -31,6 +31,7 @@
 
 use serde_json::{json, Value};
 
+use super::config::{BarSlot, Palette};
 use super::observe::{NODES, SQUARES};
 
 /// Hard ceiling on command batches per second, whatever the game asks for.
@@ -66,14 +67,20 @@ pub enum Paint {
     Sweep,
 }
 
+impl Rgb {
+    pub fn from_u32(v: u32) -> Rgb {
+        Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    }
+}
+
 impl Paint {
-    pub fn rgb(self) -> Rgb {
-        match self {
-            Paint::Alert => Rgb(0xd0, 0x20, 0x20),
-            Paint::Needed => Rgb(0xff, 0x8c, 0x00),
-            Paint::Focus => Rgb(0x2a, 0x6a, 0xd0),
-            Paint::Sweep => Rgb(0xf0, 0xf0, 0xf0),
-        }
+    pub fn rgb(self, palette: &Palette) -> Rgb {
+        Rgb::from_u32(match self {
+            Paint::Alert => palette.alert,
+            Paint::Needed => palette.needed,
+            Paint::Focus => palette.focus,
+            Paint::Sweep => palette.sweep,
+        })
     }
 }
 
@@ -109,23 +116,23 @@ impl Frame {
     /// Fills a tug-of-war bar: `fill` pixels in white's colour, the rest in
     /// black's. Clamped short of the ends so the bar never loses its
     /// orientation, even at mate.
-    pub fn eval_bar(&mut self, side: usize, win_prob_white: f64) {
+    pub fn eval_bar(&mut self, side: usize, win_prob_white: f64, palette: &Palette) {
         let fill = (win_prob_white * BAR_PIXELS as f64).round() as i64;
         let fill = fill.clamp(1, BAR_PIXELS as i64 - 1) as usize;
+        let (white, black) = (
+            Rgb::from_u32(palette.bar_white),
+            Rgb::from_u32(palette.bar_black),
+        );
         for pixel in 0..BAR_PIXELS {
-            self.bars[side][pixel] = if pixel < fill {
-                Rgb(0xe8, 0xe8, 0xe8)
-            } else {
-                Rgb(0x30, 0x34, 0x52)
-            };
+            self.bars[side][pixel] = if pixel < fill { white } else { black };
         }
     }
 
-    pub fn turn_bar(&mut self, side: usize, white_to_move: bool) {
+    pub fn turn_bar(&mut self, side: usize, white_to_move: bool, palette: &Palette) {
         let colour = if white_to_move {
-            Rgb(0xe8, 0xe8, 0xe8)
+            Rgb::from_u32(palette.bar_white)
         } else {
-            Rgb(0x30, 0x34, 0x52)
+            Rgb::from_u32(palette.bar_black)
         };
         self.bars[side] = [colour; BAR_PIXELS];
     }
@@ -164,6 +171,7 @@ pub struct Painter {
     pub bar_map: [[BarHalf; 2]; SIDES],
     /// Cleared by the first `node_error code=2` from a bar write.
     pub bars_supported: bool,
+    pub palette: Palette,
 }
 
 /// A guessed default that the assignment tool in the admin rail exists to
@@ -200,7 +208,60 @@ impl Painter {
             colours_neutralised: false,
             bar_map: default_bar_map(),
             bars_supported: true,
+            palette: Palette::default(),
         }
+    }
+
+    /// A quadrant that dropped and came back has rebooted: it has forgotten its
+    /// override mask, its bar contents and its colour keys, and the AVR's own
+    /// `bar_written_` flag went with them.
+    ///
+    /// Everything this painter believes about that node is therefore stale, and
+    /// nothing on the wire will ever tell it so — `lighting.set` only addresses
+    /// the nodes its square list names, and the 1 Hz re-assert covers squares
+    /// only. So the belief is torn up here and rebuilt from the next frame.
+    pub fn node_rejoined(&mut self, node: usize) {
+        if node >= NODES {
+            return;
+        }
+        for sq in 0..SQUARES {
+            if node_of(sq as u8) == node {
+                self.live[sq] = None;
+            }
+        }
+        self.bars_written = false;
+        self.colours_neutralised = false;
+    }
+
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+    }
+
+    /// The bar map as the venue profile stores it.
+    pub fn bar_map_slots(&self) -> [[BarSlot; 2]; SIDES] {
+        std::array::from_fn(|side| {
+            std::array::from_fn(|half| {
+                let h = self.bar_map[side][half];
+                BarSlot {
+                    node: h.node,
+                    strip: h.strip,
+                    reversed: h.reversed,
+                }
+            })
+        })
+    }
+
+    pub fn set_bar_map_slots(&mut self, slots: &[[BarSlot; 2]; SIDES]) {
+        for (side, halves) in slots.iter().enumerate() {
+            for (half, slot) in halves.iter().enumerate() {
+                self.bar_map[side][half] = BarHalf {
+                    node: slot.node,
+                    strip: if slot.strip == 'b' { 'b' } else { 'a' },
+                    reversed: slot.reversed,
+                };
+            }
+        }
+        self.bars_written = false;
     }
 
     /// An unknown UART message type answers with error code 2, surfaced as
@@ -258,7 +319,7 @@ impl Painter {
                 continue;
             }
             if frame.basic == Some(paint) {
-                wanted[device as usize] = Some(paint.rgb());
+                wanted[device as usize] = Some(paint.rgb(&self.palette));
             }
         }
 
@@ -276,13 +337,21 @@ impl Painter {
         let mut out = Vec::new();
         self.emit_squares(&wanted, online, &mut out);
         if frame.bars_wanted && self.bars_supported {
-            self.emit_bars(frame, online, &mut out);
+            self.emit_bars(frame, online, due_for_reassert, &mut out);
         }
         if out.is_empty() {
             return out;
         }
 
-        self.live = wanted;
+        // Offline quadrants keep whatever they were last told, because they were
+        // never sent the clear that would have retired it. Overwriting their
+        // entries with `None` loses the fact that the board still owes them one,
+        // and the quadrant comes back still showing a four-move-old mask.
+        for sq in 0..SQUARES {
+            if online[node_of(sq as u8)] {
+                self.live[sq] = wanted[sq];
+            }
+        }
         self.frames_in_window += 1;
         self.last_assert_ms = now_ms;
         out
@@ -343,7 +412,22 @@ impl Painter {
         }
     }
 
-    fn emit_bars(&mut self, frame: &Frame, online: [bool; NODES], out: &mut Vec<Command>) {
+    /// `reassert` forces a rewrite of halves the painter believes are already
+    /// correct.
+    ///
+    /// Bars need this more than squares do, not less: the AVR drops its
+    /// `bar_written_` flag on identify, on the idle breathe and on reboot, and
+    /// then reverts the strip to solid white. The turn halves happen to self-heal
+    /// because they flip every ply, but the eval bar clamps its fill to 1..15 —
+    /// so one of its two halves is *always* constant and could sit stuck white
+    /// for a whole game while the screen showed a perfectly correct evaluation.
+    fn emit_bars(
+        &mut self,
+        frame: &Frame,
+        online: [bool; NODES],
+        reassert: bool,
+        out: &mut Vec<Command>,
+    ) {
         let mut writes = 0;
         for side in 0..SIDES {
             for half in 0..2 {
@@ -354,7 +438,7 @@ impl Painter {
                 }
                 let slice: &[Rgb] = &frame.bars[side][half * 8..half * 8 + 8];
                 let live: &[Rgb] = &self.live_bars[side][half * 8..half * 8 + 8];
-                if self.bars_written && slice == live {
+                if self.bars_written && slice == live && !reassert {
                     continue;
                 }
                 let map = self.bar_map[side][half];
@@ -402,18 +486,47 @@ impl Painter {
     /// Commits EEPROM (~240 ms), so once per game, not per frame.
     pub fn neutralise_colours(&mut self, online: [bool; NODES]) -> Vec<Command> {
         self.colours_neutralised = true;
-        commands_for_colour_keys(online, 0xffff)
+        commands_for_colour_keys(online, self.palette.neutralised_rgb565)
     }
 
-    /// Puts the polarity colours back the way bring-up expects to find them.
+    /// Puts the board back the way bring-up expects to find it.
+    ///
+    /// Order matters. Each config write commits EEPROM (~240 ms) and the bus
+    /// queue is eight deep, so sending eight of them *before* the clear is how
+    /// the clear gets dropped and the board stays lit through the whole of the
+    /// next game's setup. The clear goes first, while the queue is empty.
     pub fn restore_colours(&mut self, online: [bool; NODES]) -> Vec<Command> {
         self.colours_neutralised = false;
-        // FastLED green and blue in RGB565 — the firmware defaults.
-        let mut out = commands_for_colour_keys_split(online, 0x07e0, 0x001f);
-        out.push(Command {
+        let mut out = vec![Command {
             name: "lighting.clear",
             args: json!({}),
-        });
+        }];
+        // `Lighting::clear` only masks the squares — `bar_written_` stays true on
+        // the AVR, so an aborted game's eval bar would otherwise sit lit until
+        // something else happened to write that strip.
+        if self.bars_supported {
+            for side in 0..SIDES {
+                for half in 0..2 {
+                    let map = self.bar_map[side][half];
+                    if map.node as usize >= NODES || !online[map.node as usize] {
+                        continue;
+                    }
+                    out.push(Command {
+                        name: "lighting.bar",
+                        args: json!({
+                            "node": map.node,
+                            "strip": map.strip.to_string(),
+                            "pixels": vec!["000000".to_string(); 8],
+                        }),
+                    });
+                }
+            }
+        }
+        out.extend(commands_for_colour_keys_split(
+            online,
+            self.palette.restore_pos_rgb565,
+            self.palette.restore_neg_rgb565,
+        ));
         self.forget();
         out
     }
@@ -561,15 +674,15 @@ mod tests {
     #[test]
     fn the_eval_bar_starts_dead_centre_and_never_bottoms_out() {
         let mut frame = Frame::default();
-        frame.eval_bar(0, 0.5);
+        frame.eval_bar(0, 0.5, &Palette::default());
         let white = frame.bars[0].iter().filter(|c| c.0 > 0x80).count();
         assert_eq!(white, 8, "the game opens on a 50/50");
 
-        frame.eval_bar(0, 1.0);
+        frame.eval_bar(0, 1.0, &Palette::default());
         let white = frame.bars[0].iter().filter(|c| c.0 > 0x80).count();
         assert_eq!(white, 15, "clamped short of mate so it keeps its orientation");
 
-        frame.eval_bar(0, 0.0);
+        frame.eval_bar(0, 0.0, &Palette::default());
         let white = frame.bars[0].iter().filter(|c| c.0 > 0x80).count();
         assert_eq!(white, 1);
     }
@@ -582,7 +695,7 @@ mod tests {
             ..Frame::default()
         };
         for side in 0..SIDES {
-            frame.eval_bar(side, 0.25);
+            frame.eval_bar(side, 0.25, &Palette::default());
         }
         let out = painter.diff(&frame, ALL_ONLINE, 1_000, identity);
         let bars = out.iter().filter(|c| c.name == "lighting.bar").count();
@@ -597,7 +710,7 @@ mod tests {
             bars_wanted: true,
             ..Frame::default()
         };
-        frame.eval_bar(0, 0.125); // one white pixel at the low end
+        frame.eval_bar(0, 0.125, &Palette::default()); // one white pixel at the low end
         let out = painter.diff(&frame, ALL_ONLINE, 1_000, identity);
         let first = out.iter().find(|c| c.name == "lighting.bar").unwrap();
         let pixels = first.args["pixels"].as_array().unwrap();

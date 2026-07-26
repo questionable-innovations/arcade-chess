@@ -74,14 +74,17 @@
 		z-index: 20;
 		display: grid;
 		place-items: center;
-		padding: 24px;
+		padding: calc(24px + var(--safe-t)) calc(24px + var(--safe-r)) calc(24px + var(--safe-b))
+			calc(24px + var(--safe-l));
 		background: rgb(6 7 8 / 0.86);
 		backdrop-filter: blur(8px);
 	}
 	.panel {
 		width: min(560px, 100%);
 		max-height: 90vh;
+		max-height: 90dvh;
 		overflow-y: auto;
+		overscroll-behavior: contain;
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
@@ -159,10 +162,15 @@
 
 	.actions {
 		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
 		gap: 10px;
 		margin-top: 12px;
+		width: 100%;
 	}
 	button {
+		flex: 0 1 auto;
+		min-height: 44px;
 		padding: 11px 22px;
 		font-family: inherit;
 		font-size: 14px;
@@ -183,5 +191,24 @@
 		color: var(--color-fg-dim);
 		background: transparent;
 		border: 1px solid var(--color-line);
+	}
+
+	@media (max-width: 560px) {
+		.overlay {
+			padding: calc(14px + var(--safe-t)) calc(14px + var(--safe-r)) calc(14px + var(--safe-b))
+				calc(14px + var(--safe-l));
+		}
+		.panel {
+			padding: 24px 18px;
+			border-radius: 14px;
+		}
+		.moves {
+			gap: 2px 12px;
+			font-size: 12px;
+		}
+		/* Two full-width taps beat two half-width ones a thumb can miss. */
+		.actions button {
+			flex: 1 1 100%;
+		}
 	}
 </style>

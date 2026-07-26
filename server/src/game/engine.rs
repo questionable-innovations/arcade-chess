@@ -39,6 +39,10 @@ pub enum EvalSource {
     Stockfish,
     Material,
     Admin,
+    /// Nothing has been evaluated yet. Distinct from `Material` so a bar that
+    /// has never been given a number does not wear a badge claiming one was
+    /// counted.
+    Unknown,
 }
 
 impl EvalSource {
@@ -47,6 +51,7 @@ impl EvalSource {
             EvalSource::Stockfish => "stockfish",
             EvalSource::Material => "material",
             EvalSource::Admin => "admin",
+            EvalSource::Unknown => "unknown",
         }
     }
 }
@@ -132,6 +137,13 @@ impl EngineHandle {
     /// for a result that will never arrive.
     pub fn request(&self, request: EvalRequest) -> bool {
         self.tx.send(request).is_ok()
+    }
+
+    /// A handle wired to a caller-owned channel, for driving the game task in
+    /// tests without spawning Stockfish.
+    #[cfg(test)]
+    pub fn for_test(tx: mpsc::UnboundedSender<EvalRequest>) -> EngineHandle {
+        EngineHandle { tx }
     }
 }
 
@@ -274,7 +286,23 @@ async fn run(
                 let _ = results.send(unavailable(&request));
                 continue;
             }
-            match Engine::spawn().await {
+            // Bounded exactly like the search below it. `spawn` waits for
+            // `uciok` and `readyok` in an unbounded read loop that exits only on
+            // the token or on EOF — so a binary that execs, stays alive and
+            // never speaks UCI wedges this task forever. The channel stays open,
+            // so `request` keeps returning true, the material fallback never
+            // fires, `eval.status` stays `pending` for the rest of the night,
+            // and the state machine deadlocks the first time it reaches Scoring.
+            // `STOCKFISH_PATH` exists precisely to be repointed at the venue,
+            // which is exactly when a wrong binary gets pointed at.
+            match tokio::time::timeout(SEARCH_TIMEOUT, Engine::spawn())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "engine did not answer the UCI handshake",
+                    ))
+                }) {
                 Ok(started) => {
                     engine = Some(started);
                     backoff = BACKOFF_MIN;

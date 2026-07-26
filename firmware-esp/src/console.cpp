@@ -23,6 +23,7 @@ void Console::printHelp() const {
     "  fw-flash-all (one shared stream; lowest online node responds)\n"
     "  fw-abort | fw-enter <node> <token> <size> <crc32> <update-id> | fw-end <token>\n"
     "  device-id <id> | token <bearer-token> | reboot\n"
+    "  backend [host] [port] [path]  (no args prints the current backend)\n"
     "Config keys: 1 enter, 2 exit, 3 debounce, 4 settle_us, 5 scan_ms,\n"
     "             6 brightness, 7 positive_rgb565, 8 negative_rgb565,\n"
     "             9 orientation, 10 runtime_mode"));
@@ -151,6 +152,25 @@ void Console::execute(char* line) {
     if (ssid && pass) {
       config_->wifi_ssid = ssid; config_->wifi_password = pass;
       config_->save(*preferences_); Serial.println(F("saved; reboot to connect"));
+    }
+  } else if (!strcmp(command, "backend")) {
+    // The board could be pointed at exactly one place, baked in at flash time.
+    // If the venue blocks outbound 443, or the internet dies and the server has
+    // to come up on a laptop, that is a reflash on the worst possible day — and
+    // the NVS layer already stored all three fields.
+    const char* host = strtok_r(nullptr, " ", &save);
+    const char* port = strtok_r(nullptr, " ", &save);
+    const char* path = strtok_r(nullptr, " ", &save);
+    if (!host) {
+      Serial.printf("backend %s:%u%s\n", config_->websocket_host.c_str(),
+                    config_->websocket_port, config_->websocket_path.c_str());
+    } else {
+      config_->websocket_host = host;
+      if (port) config_->websocket_port = static_cast<uint16_t>(strtoul(port, nullptr, 10));
+      if (path) config_->websocket_path = path;
+      config_->save(*preferences_);
+      Serial.printf("saved %s:%u%s; reboot to connect\n", config_->websocket_host.c_str(),
+                    config_->websocket_port, config_->websocket_path.c_str());
     }
   } else if (!strcmp(command, "device-id")) {
     const char* value = strtok_r(nullptr, " ", &save);

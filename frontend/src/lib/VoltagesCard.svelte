@@ -70,7 +70,8 @@
 	}
 	.btn {
 		flex: 1;
-		height: 30px;
+		min-height: 30px;
+		padding: 7px 10px;
 		font-family: var(--font-mono);
 		font-size: 11px;
 		color: var(--color-fg-dim);
@@ -83,9 +84,11 @@
 			border-color 0.15s ease,
 			background 0.15s ease;
 	}
-	.btn:hover:not(:disabled) {
-		color: var(--color-fg);
-		border-color: var(--color-fg-faint);
+	@media (hover: hover) {
+		.btn:hover:not(:disabled) {
+			color: var(--color-fg);
+			border-color: var(--color-fg-faint);
+		}
 	}
 	.btn:disabled {
 		opacity: 0.4;
