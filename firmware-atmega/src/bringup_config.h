@@ -42,6 +42,8 @@ constexpr uint8_t kIdentifyBlue = 0;
 // A node with no EEPROM identity can never be addressed, so it can never answer
 // a scan or report its own state. The strips are the only channel left.
 constexpr uint16_t kUnprovisionedBlinkMs = 500;
+// Chance out of 255 that any given pixel is lit on a shimmer frame.
+constexpr uint8_t kShimmerOnChance = 40;
 constexpr uint16_t kDefaultAdcMidpoint = 512;
 constexpr uint16_t kMinimumCalibrationBaseline = 120;
 constexpr uint16_t kMaximumCalibrationBaseline = 900;
