@@ -26,16 +26,8 @@ constexpr uint8_t kEdgeStripPixels = 8;
 constexpr uint16_t kIdentifyBlinkMs = 180;
 // With no ESP on the bus nothing ever opens a render window, so the strips would
 // stay dark on an otherwise healthy node. After this much bus silence the
-// quadrant idles on a slow breath instead.
+// quadrant idles on a shimmer instead.
 constexpr uint16_t kBusIdleTimeoutMs = 3000;
-// One fixed hue per LED output, so a glance says which pin drives which strip.
-constexpr uint8_t kIdleHuePrimary = 0;     // red
-constexpr uint8_t kIdleHueSecondary = 96;  // green
-constexpr uint8_t kIdleHueEdgeA = 160;     // blue
-constexpr uint8_t kIdleHueEdgeB = 32;      // amber
-constexpr uint16_t kIdleBreathMs = 5000;
-constexpr uint8_t kIdleMinimumValue = 12;
-constexpr uint8_t kIdleMaximumValue = 144;
 constexpr uint8_t kIdentifyRed = 255;
 constexpr uint8_t kIdentifyGreen = 72;
 constexpr uint8_t kIdentifyBlue = 0;

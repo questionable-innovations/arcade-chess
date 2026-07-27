@@ -45,9 +45,12 @@ class Lighting {
 
  private:
   CRGB rgb565(uint16_t value) const;
-  // The board no longer has a lit shape of its own: every strip just twinkles,
-  // regardless of sensor state, server overrides, or IDENTIFY.
-  void renderShimmer();
+  void setSquare(uint8_t square, const CRGB& colour);
+  void render(uint32_t now_ms);
+  // The idle timeout no longer breathes a solid colour: the board twinkles
+  // instead, with settled pieces still punching through at full value.
+  void renderIdle(uint32_t now_ms);
+  void renderUnprovisioned(uint32_t now_ms);
   bool busIdle(uint32_t now_ms) const;
 
   Settings& settings_;

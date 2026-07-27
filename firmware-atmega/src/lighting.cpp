@@ -6,6 +6,18 @@
 namespace quadrant {
 namespace {
 constexpr uint16_t kFrameIntervalMs = 1000U / bringup::kLedFramesPerSecond;
+
+// One amber says "look at me" for both attention states: the addressed IDENTIFY
+// and the unprovisioned blink.
+CRGB identifyColour() {
+  return CRGB(bringup::kIdentifyRed, bringup::kIdentifyGreen, bringup::kIdentifyBlue);
+}
+
+void shimmerFill(CRGB* strip, uint8_t count) {
+  for (uint8_t i = 0; i < count; ++i) {
+    strip[i] = random8() < bringup::kShimmerOnChance ? CRGB::White : CRGB::Black;
+  }
+}
 }
 
 Lighting::Lighting(Settings& settings, Sensors& sensors)
@@ -27,23 +39,84 @@ CRGB Lighting::rgb565(uint16_t c) const {
   return CRGB(red, green, blue);
 }
 
+void Lighting::setSquare(uint8_t square, const CRGB& value) {
+  const uint8_t first = board_map::firstPixelForSquare(square);
+  primary_[first] = value;
+  primary_[first + 1] = value;
+  secondary_[first] = value;
+  secondary_[first + 1] = value;
+}
+
+void Lighting::render(uint32_t now_ms) {
+  fill_solid(primary_, bringup::kSquareStripPixels, CRGB::Black);
+  fill_solid(secondary_, bringup::kSquareStripPixels, CRGB::Black);
+  // A written bar keeps whatever SET_PIXELS left in the strip; only an
+  // unwritten one falls back to the solid white every build has always shown.
+  if (!bar_written_[0]) fill_solid(edge_a_, bringup::kEdgeStripPixels, CRGB::White);
+  if (!bar_written_[1]) fill_solid(edge_b_, bringup::kEdgeStripPixels, CRGB::White);
+  const bool identifying = static_cast<int32_t>(identify_until_ms_ - now_ms) > 0;
+  for (uint8_t square = 0; square < arcade::kSquaresPerQuadrant; ++square) {
+    CRGB value = CRGB::Black;
+    if (identifying) {
+      if ((now_ms / bringup::kIdentifyBlinkMs) & 1U) value = identifyColour();
+    } else if (override_mask_ & (1U << square)) {
+      value = CRGB(override_red_, override_green_, override_blue_);
+    } else if (sensors_.state(square) == arcade::SensorState::kPositive) {
+      value = rgb565(settings_.positive_rgb565);
+    } else if (sensors_.state(square) == arcade::SensorState::kNegative) {
+      value = rgb565(settings_.negative_rgb565);
+    }
+    setSquare(square, value);
+  }
+  if (identifying) {
+    // IDENTIFY is the "which node is this?" answer and outranks everything.
+    // It overwrites the bar in place, so a written bar has to be re-sent
+    // afterwards — the server re-asserts every second, so it heals itself.
+    fill_solid(edge_a_, bringup::kEdgeStripPixels, identifyColour());
+    fill_solid(edge_b_, bringup::kEdgeStripPixels, identifyColour());
+    bar_written_[0] = false;
+    bar_written_[1] = false;
+  }
+  // These calls mask interrupts for roughly 2.4 ms total. They run only after an
+  // ESP render-window broadcast, while the shared bus is intentionally idle.
+  FastLED.show();
+}
+
 bool Lighting::busIdle(uint32_t now_ms) const {
   return static_cast<int32_t>(now_ms - last_bus_activity_ms_) >=
          static_cast<int32_t>(bringup::kBusIdleTimeoutMs);
 }
 
-void Lighting::renderShimmer() {
-  auto shimmer = [](CRGB* strip, uint8_t count) {
-    for (uint8_t i = 0; i < count; ++i) {
-      strip[i] = random8() < bringup::kShimmerOnChance ? CRGB::White : CRGB::Black;
+void Lighting::renderIdle(uint32_t now_ms) {
+  // The idle shimmer owns the whole board, bars included. Forget any written
+  // bar rather than leaving one frozen mid-twinkle when the ESP returns.
+  bar_written_[0] = false;
+  bar_written_[1] = false;
+  shimmerFill(primary_, bringup::kSquareStripPixels);
+  shimmerFill(secondary_, bringup::kSquareStripPixels);
+  shimmerFill(edge_a_, bringup::kEdgeStripPixels);
+  shimmerFill(edge_b_, bringup::kEdgeStripPixels);
+  // Settled pieces punch through the shimmer at full value, so squares stay
+  // testable with no ESP attached.
+  for (uint8_t square = 0; square < arcade::kSquaresPerQuadrant; ++square) {
+    if (sensors_.state(square) == arcade::SensorState::kPositive) {
+      setSquare(square, rgb565(settings_.positive_rgb565));
+    } else if (sensors_.state(square) == arcade::SensorState::kNegative) {
+      setSquare(square, rgb565(settings_.negative_rgb565));
     }
-  };
-  shimmer(primary_, bringup::kSquareStripPixels);
-  shimmer(secondary_, bringup::kSquareStripPixels);
-  shimmer(edge_a_, bringup::kEdgeStripPixels);
-  shimmer(edge_b_, bringup::kEdgeStripPixels);
-  // These calls mask interrupts for roughly 2.4 ms total. They run only after an
-  // ESP render-window broadcast, while the shared bus is intentionally idle.
+  }
+  // Safe to mask interrupts here: the bus has been silent for seconds, and a
+  // frame arriving mid-show only costs the ESP one retry before idle ends.
+  FastLED.show();
+}
+
+void Lighting::renderUnprovisioned(uint32_t now_ms) {
+  const bool on = (now_ms / bringup::kUnprovisionedBlinkMs) & 1U;
+  const CRGB value = on ? identifyColour() : CRGB(CRGB::Black);
+  fill_solid(primary_, bringup::kSquareStripPixels, value);
+  fill_solid(secondary_, bringup::kSquareStripPixels, value);
+  fill_solid(edge_a_, bringup::kEdgeStripPixels, value);
+  fill_solid(edge_b_, bringup::kEdgeStripPixels, value);
   FastLED.show();
 }
 
@@ -56,7 +129,7 @@ void Lighting::tick(uint32_t now_ms) {
     // This node never transmits, so an unsynchronised shift-out costs nothing.
     if (static_cast<int32_t>(now_ms - next_frame_ms_) < 0) return;
     next_frame_ms_ = now_ms + kFrameIntervalMs;
-    renderShimmer();
+    renderUnprovisioned(now_ms);
     return;
   }
   if (render_requested_) {
@@ -65,13 +138,13 @@ void Lighting::tick(uint32_t now_ms) {
     // would drop alternate windows and push the rest over live bus traffic.
     render_requested_ = false;
     next_frame_ms_ = now_ms + kFrameIntervalMs;
-    renderShimmer();
+    render(now_ms);
     return;
   }
   if (!busIdle(now_ms)) return;
   if (static_cast<int32_t>(now_ms - next_frame_ms_) < 0) return;
   next_frame_ms_ = now_ms + kFrameIntervalMs;
-  renderShimmer();
+  renderIdle(now_ms);
 }
 
 void Lighting::setSquares(uint16_t mask, uint8_t red, uint8_t green, uint8_t blue,
